@@ -1,0 +1,380 @@
+"""Command-line interface."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import click
+from rich.console import Console
+
+from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE, load_config
+from dmp_to_parquet.converter import OracleAdminConnection, OracleDumpConverter
+from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
+from dmp_to_parquet.models import ConversionPlan
+from dmp_to_parquet.oracle_conn import create_directory, oracle_connection
+from dmp_to_parquet.planner import plan_tables
+from dmp_to_parquet.serialization import load_manifest, load_plan, save_manifest, save_plan
+from dmp_to_parquet.state import StateStore
+
+console = Console()
+DEFAULT_DUMP_DIRECTORY = "DMP2PARQUET_DUMP"
+DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
+
+
+@click.group()
+def main() -> None:
+    """Convert Oracle Data Pump dumps to Parquet."""
+
+
+@main.command()
+def doctor() -> None:
+    """Check local runtime prerequisites."""
+
+    if docker_available():
+        console.print("[green]Docker is available[/green]")
+    else:
+        raise click.ClickException("Docker is not available")
+    console.print("[green]Python dependencies are importable[/green]")
+
+
+def _dump_paths_or_plan_dump_paths(
+    dump_paths: tuple[Path, ...],
+    plan_dump_paths: tuple[str, ...] = (),
+) -> tuple[Path, ...]:
+    if dump_paths:
+        return tuple(path.resolve() for path in dump_paths)
+    return tuple(Path(path).resolve() for path in plan_dump_paths)
+
+
+def _validate_dump_paths(dump_paths: tuple[Path, ...]) -> tuple[Path, tuple[str, ...]]:
+    if not dump_paths:
+        raise click.ClickException("At least one --dump is required")
+    dump_dirs = {path.parent.resolve() for path in dump_paths}
+    if len(dump_dirs) != 1:
+        raise click.ClickException("All dump files must be in the same directory")
+    dump_dir = next(iter(dump_dirs))
+    return dump_dir, tuple(path.name for path in dump_paths)
+
+
+def _admin_for_container(container: DockerOracle, password: str) -> OracleAdminConnection:
+    return OracleAdminConnection(
+        host="localhost",
+        port=container.mapped_port(),
+        service=container.service,
+        user="system",
+        password=password,
+    )
+
+
+def _create_dump_directory(admin: OracleAdminConnection) -> None:
+    with oracle_connection(
+        host=admin.host,
+        port=admin.port,
+        service=admin.service,
+        user=admin.user,
+        password=admin.password,
+    ) as conn:
+        create_directory(conn, DEFAULT_DUMP_DIRECTORY, DEFAULT_CONTAINER_DUMP_PATH)
+
+
+def _build_converter(
+    *,
+    container: DockerOracle,
+    admin: OracleAdminConnection,
+    work_dir: Path,
+    dumpfiles: tuple[str, ...],
+    stage_schema: str,
+) -> OracleDumpConverter:
+    return OracleDumpConverter(
+        container=container,
+        admin=admin,
+        work_dir=work_dir,
+        dumpfiles=dumpfiles,
+        directory=DEFAULT_DUMP_DIRECTORY,
+        directory_path=DEFAULT_CONTAINER_DUMP_PATH,
+        stage_schema=stage_schema,
+    )
+
+
+@main.command()
+@click.option(
+    "--dump",
+    "dump_paths",
+    multiple=True,
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path),
+    default=Path("work"),
+    show_default=True,
+)
+@click.option(
+    "--output",
+    "manifest_path",
+    type=click.Path(path_type=Path),
+    default=Path("work/manifest.json"),
+    show_default=True,
+)
+@click.option(
+    "--oracle-image",
+    default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
+    show_default="gvenzl/oracle-free:23-slim",
+)
+@click.option("--oracle-password", default="OraclePwd_123", show_default=True)
+@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
+def inspect(
+    dump_paths: tuple[Path, ...],
+    work_dir: Path,
+    manifest_path: Path,
+    oracle_image: str,
+    oracle_password: str,
+    stage_schema: str,
+) -> None:
+    """Inspect a full Data Pump dump and write a manifest."""
+
+    dump_dir, dumpfiles = _validate_dump_paths(dump_paths)
+    with DockerOracle.start(
+        image=oracle_image,
+        password=oracle_password,
+        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+    ) as container:
+        console.print(f"Started Oracle container [bold]{container.name}[/bold]")
+        container.wait_ready()
+        admin = _admin_for_container(container, oracle_password)
+        _create_dump_directory(admin)
+        converter = _build_converter(
+            container=container,
+            admin=admin,
+            work_dir=work_dir,
+            dumpfiles=dumpfiles,
+            stage_schema=stage_schema,
+        )
+        manifest = converter.inspect_dump()
+        manifest = type(manifest)(
+            dump_paths=tuple(str(path.resolve()) for path in dump_paths),
+            tables=manifest.tables,
+            version=manifest.version,
+        )
+        save_manifest(manifest_path, manifest)
+        console.print(f"[green]Wrote manifest with {len(manifest.tables)} tables[/green]")
+
+
+@main.command("plan")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+)
+@click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output",
+    "plan_path",
+    type=click.Path(path_type=Path),
+    default=Path("work/plan.yaml"),
+    show_default=True,
+)
+@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
+def plan_command(
+    manifest_path: Path,
+    config_path: Path | None,
+    plan_path: Path,
+    stage_schema: str,
+) -> None:
+    """Build a conversion plan from an inspection manifest."""
+
+    manifest = load_manifest(manifest_path)
+    config = load_config(config_path)
+    table_plans = plan_tables(manifest.tables, config)
+    plan = ConversionPlan(
+        dump_paths=manifest.dump_paths,
+        tables=table_plans,
+        oracle_image=config.oracle_image,
+        max_stage_gb=config.max_stage_gb,
+        stage_schema=stage_schema,
+    )
+    save_plan(plan_path, plan)
+    unsupported = [table for table in table_plans if table.reason]
+    console.print(
+        f"[green]Wrote plan for {len(table_plans)} tables "
+        f"({len(unsupported)} unsupported)[/green]"
+    )
+
+
+@main.command("convert")
+@click.option("--plan", "plan_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--dump",
+    "dump_paths",
+    multiple=True,
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
+@click.option("--output", "output_dir", type=click.Path(path_type=Path), required=True)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path),
+    default=Path("work"),
+    show_default=True,
+)
+@click.option(
+    "--oracle-image",
+    default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
+    show_default="gvenzl/oracle-free:23-slim",
+)
+@click.option("--oracle-password", default="OraclePwd_123", show_default=True)
+@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
+def convert(
+    plan_path: Path | None,
+    dump_paths: tuple[Path, ...],
+    config_path: Path | None,
+    output_dir: Path,
+    work_dir: Path,
+    oracle_image: str,
+    oracle_password: str,
+    stage_schema: str,
+) -> None:
+    """Convert all tables in a plan, or inspect/plan/convert in one command."""
+
+    if plan_path:
+        plan = load_plan(plan_path)
+        resolved_dump_paths = _dump_paths_or_plan_dump_paths(dump_paths, plan.dump_paths)
+    else:
+        config = load_config(config_path)
+        resolved_dump_paths = _dump_paths_or_plan_dump_paths(dump_paths)
+        plan = None
+        oracle_image = config.oracle_image if oracle_image == DEFAULT_ORACLE_IMAGE else oracle_image
+
+    dump_dir, dumpfiles = _validate_dump_paths(resolved_dump_paths)
+    image = plan.oracle_image if plan else oracle_image
+    active_stage_schema = plan.stage_schema if plan else stage_schema
+
+    with DockerOracle.start(
+        image=image,
+        password=oracle_password,
+        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+    ) as container:
+        console.print(f"Started Oracle container [bold]{container.name}[/bold]")
+        container.wait_ready()
+        admin = _admin_for_container(container, oracle_password)
+        _create_dump_directory(admin)
+        converter = _build_converter(
+            container=container,
+            admin=admin,
+            work_dir=work_dir,
+            dumpfiles=dumpfiles,
+            stage_schema=active_stage_schema,
+        )
+        if plan is None:
+            config = load_config(config_path)
+            manifest = converter.inspect_dump()
+            plan = ConversionPlan(
+                dump_paths=tuple(str(path) for path in resolved_dump_paths),
+                tables=plan_tables(manifest.tables, config),
+                oracle_image=image,
+                max_stage_gb=config.max_stage_gb,
+                stage_schema=active_stage_schema,
+            )
+            save_manifest(work_dir / "manifest.json", manifest)
+            save_plan(work_dir / "plan.yaml", plan)
+        state_store = StateStore(work_dir / "state.sqlite")
+        try:
+            result = converter.convert_plan(plan, output_dir, state_store)
+        finally:
+            state_store.close()
+        console.print(
+            f"[green]Converted {result.rows} rows across "
+            f"{len(result.tables)} tables[/green]"
+        )
+
+
+@main.command("convert-hash-table")
+@click.option(
+    "--dump",
+    "dump_paths",
+    multiple=True,
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+)
+@click.option("--source-schema", required=True)
+@click.option("--table", "table_name", required=True)
+@click.option("--split-column", required=True)
+@click.option("--buckets", default=64, show_default=True, type=int)
+@click.option("--output", "output_dir", type=click.Path(path_type=Path), required=True)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path),
+    default=Path("work"),
+    show_default=True,
+)
+@click.option(
+    "--oracle-image",
+    default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
+    show_default="gvenzl/oracle-free:23-slim",
+)
+@click.option("--oracle-password", default="OraclePwd_123", show_default=True)
+@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
+def convert_hash_table(
+    dump_paths: tuple[Path, ...],
+    source_schema: str,
+    table_name: str,
+    split_column: str,
+    buckets: int,
+    output_dir: Path,
+    work_dir: Path,
+    oracle_image: str,
+    oracle_password: str,
+    stage_schema: str,
+) -> None:
+    """Convert one table from a dump using Data Pump QUERY hash buckets."""
+
+    if buckets < 1:
+        raise click.ClickException("--buckets must be at least 1")
+    dump_dir, dumpfiles = _validate_dump_paths(dump_paths)
+
+    with DockerOracle.start(
+        image=oracle_image,
+        password=oracle_password,
+        mounts=((dump_dir, "/dumps", "rw"),),
+    ) as container:
+        console.print(f"Started Oracle container [bold]{container.name}[/bold]")
+        container.wait_ready()
+        port = container.mapped_port()
+        admin = OracleAdminConnection(
+            host="localhost",
+            port=port,
+            service=container.service,
+            user="system",
+            password=oracle_password,
+        )
+        with oracle_connection(
+            host=admin.host,
+            port=admin.port,
+            service=admin.service,
+            user=admin.user,
+            password=admin.password,
+        ) as conn:
+            create_directory(conn, DEFAULT_DUMP_DIRECTORY, DEFAULT_CONTAINER_DUMP_PATH)
+        converter = OracleDumpConverter(
+            container=container,
+            admin=admin,
+            work_dir=work_dir,
+            dumpfiles=dumpfiles,
+            directory=DEFAULT_DUMP_DIRECTORY,
+            directory_path=DEFAULT_CONTAINER_DUMP_PATH,
+            stage_schema=stage_schema,
+        )
+        result = converter.convert_hash_table(
+            source_schema=source_schema,
+            table=table_name,
+            split_column=split_column,
+            buckets=buckets,
+            output_dir=output_dir,
+        )
+        console.print(
+            f"[green]Converted {result.rows} rows from "
+            f"{source_schema}.{table_name}[/green]"
+        )

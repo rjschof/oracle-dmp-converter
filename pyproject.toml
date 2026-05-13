@@ -1,0 +1,65 @@
+[project]
+name = "dmp-to-parquet"
+version = "0.1.0"
+description = "Convert Oracle Data Pump dumps to Parquet through Oracle Free staging."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1.8",
+    "oracledb>=2.5.1",
+    "pyarrow>=18.1.0",
+    "pyyaml>=6.0.2",
+    "rich>=13.9.4",
+]
+
+[project.scripts]
+dmp-to-parquet = "dmp_to_parquet.cli:main"
+
+[dependency-groups]
+dev = [
+    "pylint>=4.0.5",
+    "pytest>=8.3.4",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require Docker and Oracle Free",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pylint.main]
+py-version = "3.12"
+source-roots = ["src", "scripts", "tests"]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.messages_control]
+disable = [
+    "broad-exception-caught",
+    "duplicate-code",
+    "fixme",
+    "line-too-long",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "missing-module-docstring",
+    "too-many-arguments",
+    "too-few-public-methods",
+    "too-many-instance-attributes",
+    "too-many-locals",
+    "too-many-positional-arguments",
+    "too-many-return-statements",
+]
