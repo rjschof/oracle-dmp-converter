@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from stat import S_IMODE
+from typing import Any
 
+import docker
 import oracledb
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
 from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE
-from dmp_to_parquet.errors import DockerError
+from dmp_to_parquet.errors import (
+    DockerContainerError,
+    DockerError,
+    DockerExecError,
+    DockerImageError,
+    DockerPortError,
+    DockerReadinessError,
+)
 
 
 def docker_available() -> bool:
@@ -26,12 +36,57 @@ def docker_available() -> bool:
     return result.returncode == 0
 
 
-def _run_docker(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, check=False)
-    if check and result.returncode != 0:
-        msg = result.stderr.strip() or result.stdout.strip() or f"docker {' '.join(args)} failed"
-        raise DockerError(msg)
-    return result
+def _docker_client() -> docker.DockerClient:
+    try:
+        return docker.from_env()
+    except DockerException as exc:
+        raise DockerError(str(exc)) from exc
+
+
+def _run_docker_cp(host_path: Path, container_name: str, container_path: str) -> None:
+    result = subprocess.run(
+        ["docker", "cp", str(host_path), f"{container_name}:{container_path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        msg = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"docker cp failed: {host_path} -> {container_name}:{container_path}"
+        )
+        raise DockerExecError(msg)
+
+
+def _ensure_mount_path_permissions(host_path: Path, mode: str) -> Path:
+    resolved = host_path.resolve()
+    if not resolved.exists():
+        raise DockerContainerError(f"Mount path does not exist: {resolved}")
+
+    try:
+        current_mode = S_IMODE(resolved.stat().st_mode)
+    except OSError as exc:
+        raise DockerContainerError(f"Unable to inspect mount path permissions: {resolved}") from exc
+
+    if resolved.is_dir():
+        required_mode = 0o005
+        if "w" in mode:
+            required_mode |= 0o002
+    else:
+        required_mode = 0o004
+        if "w" in mode:
+            required_mode |= 0o002
+
+    target_mode = current_mode | required_mode
+    if target_mode != current_mode:
+        try:
+            resolved.chmod(target_mode)
+        except OSError as exc:
+            raise DockerContainerError(
+                f"Mount path is not accessible for Oracle container user: {resolved}"
+            ) from exc
+    return resolved
 
 
 @dataclass
@@ -43,6 +98,8 @@ class DockerOracle:
     platform: str | None = None
     mounts: tuple[tuple[Path, str, str], ...] = ()
     started: bool = False
+    _client: docker.DockerClient | None = field(default=None, init=False, repr=False)
+    _container: Any | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def start(
@@ -67,57 +124,93 @@ class DockerOracle:
         return container
 
     def _start_container(self) -> None:
-        args = [
-            "run",
-            "--detach",
-            "--rm",
-            "--name",
-            self.name,
-            "--shm-size",
-            "1g",
-            "-e",
-            f"ORACLE_PASSWORD={self.password}",
-            "-p",
-            "127.0.0.1::1521",
-        ]
-        if self.platform:
-            args.extend(["--platform", self.platform])
+        volumes: dict[str, dict[str, str]] = {}
         for host_path, container_path, mode in self.mounts:
-            args.extend(["-v", f"{host_path.resolve()}:{container_path}:{mode}"])
-        args.append(self.image)
-        _run_docker(args)
+            prepared = _ensure_mount_path_permissions(host_path, mode)
+            volumes[str(prepared)] = {"bind": container_path, "mode": mode}
+
+        ports = {"1521/tcp": ("127.0.0.1", None)}
+        self._client = _docker_client()
+        try:
+            self._container = self._client.containers.run(
+                self.image,
+                detach=True,
+                remove=True,
+                name=self.name,
+                shm_size="1g",
+                environment={"ORACLE_PASSWORD": self.password},
+                ports=ports,
+                platform=self.platform,
+                volumes=volumes or None,
+            )
+        except ImageNotFound as exc:
+            raise DockerImageError(f"Docker image not found: {self.image}") from exc
+        except APIError as exc:
+            message = str(exc)
+            if "pull access denied" in message.lower() or "not found" in message.lower():
+                raise DockerImageError(message) from exc
+            raise DockerContainerError(message) from exc
+        except DockerException as exc:
+            raise DockerContainerError(str(exc)) from exc
         self.started = True
 
+    def _require_container(self) -> Any:
+        if self._container is None:
+            raise DockerContainerError("Oracle container is not started")
+        return self._container
+
     def mapped_port(self) -> int:
-        result = _run_docker(["inspect", self.name])
-        data = json.loads(result.stdout)[0]
-        ports = data["NetworkSettings"]["Ports"].get("1521/tcp")
-        if not ports:
-            raise DockerError("Oracle container does not expose port 1521")
-        return int(ports[0]["HostPort"])
+        container = self._require_container()
+        try:
+            container.reload()
+            ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+            mappings = ports.get("1521/tcp")
+            if not mappings:
+                raise DockerPortError("Oracle container does not expose port 1521")
+            return int(mappings[0]["HostPort"])
+        except (APIError, KeyError, TypeError, ValueError) as exc:
+            if isinstance(exc, DockerError):
+                raise
+            raise DockerPortError(str(exc)) from exc
 
     def logs(self) -> str:
-        result = _run_docker(["logs", self.name], check=False)
-        return result.stdout + result.stderr
+        container = self._require_container()
+        try:
+            output = container.logs(stdout=True, stderr=True)
+        except (APIError, DockerException) as exc:
+            raise DockerContainerError(str(exc)) from exc
+        if isinstance(output, bytes):
+            return output.decode("utf-8", errors="replace")
+        return str(output)
 
     def exec(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        result = _run_docker(["exec", self.name, *args], check=False)
+        # Use subprocess rather than the Docker SDK's exec_run: exec_run blocks
+        # indefinitely when the container stops mid-exec because the HTTP chunked
+        # stream never sends EOF. The docker exec CLI exits cleanly in that scenario.
+        result = subprocess.run(
+            ["docker", "exec", self.name, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if check and result.returncode != 0:
             msg = result.stderr.strip() or result.stdout.strip() or f"docker exec failed: {args}"
-            raise DockerError(msg)
+            raise DockerExecError(msg)
         return result
 
     def copy_to(self, host_path: Path, container_path: str) -> None:
-        _run_docker(["cp", str(host_path), f"{self.name}:{container_path}"])
+        _run_docker_cp(host_path, self.name, container_path)
 
     def wait_ready(self, timeout_seconds: int = 600) -> None:
         deadline = time.monotonic() + timeout_seconds
         last_error: Exception | None = None
+        container = self._require_container()
         while time.monotonic() < deadline:
-            state = _run_docker(["inspect", self.name], check=False)
-            if state.returncode != 0:
-                raise DockerError(state.stderr.strip() or "Oracle container disappeared")
             try:
+                container.reload()
+                state = container.attrs.get("State", {})
+                if not state.get("Running"):
+                    raise DockerReadinessError("Oracle container disappeared")
                 conn = oracledb.connect(
                     user="system",
                     password=self.password,
@@ -130,6 +223,8 @@ class DockerOracle:
                     return
                 finally:
                     conn.close()
+            except DockerReadinessError:
+                raise
             except Exception as exc:  # noqa: BLE001 - readiness polling preserves the last error.
                 last_error = exc
                 time.sleep(5)
@@ -138,12 +233,26 @@ class DockerOracle:
         if last_error:
             msg += f"; last connection error: {last_error}"
         msg += f"\nContainer logs:\n{logs}"
-        raise DockerError(msg)
+        raise DockerReadinessError(msg)
 
     def stop(self) -> None:
         if self.started:
-            _run_docker(["stop", "--timeout", "30", self.name], check=False)
+            try:
+                container = self._require_container()
+                container.stop(timeout=30)
+            except NotFound:
+                pass
+            except (APIError, DockerException):
+                try:
+                    container = self._require_container()
+                    container.kill()
+                except (NotFound, APIError, DockerException):
+                    pass
             self.started = False
+            self._container = None
+            if self._client is not None:
+                self._client.close()
+                self._client = None
 
     def __enter__(self) -> DockerOracle:
         return self

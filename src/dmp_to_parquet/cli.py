@@ -121,7 +121,7 @@ def _build_converter(
 @click.option(
     "--oracle-image",
     default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
-    show_default="gvenzl/oracle-free:23-slim",
+    show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
 @click.option("--stage-schema", default="DMP_STAGE", show_default=True)
@@ -223,7 +223,7 @@ def plan_command(
 @click.option(
     "--oracle-image",
     default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
-    show_default="gvenzl/oracle-free:23-slim",
+    show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
 @click.option("--stage-schema", default="DMP_STAGE", show_default=True)
@@ -313,7 +313,7 @@ def convert(
 @click.option(
     "--oracle-image",
     default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
-    show_default="gvenzl/oracle-free:23-slim",
+    show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
 @click.option("--stage-schema", default="DMP_STAGE", show_default=True)

@@ -31,7 +31,7 @@ This build includes:
 ## Default Oracle image
 
 ```text
-gvenzl/oracle-free:23-slim
+gvenzl/oracle-free:23-faststart
 ```
 
 Override with `DMP_TO_PARQUET_ORACLE_IMAGE` in tests or `--oracle-image` in CLI commands.
@@ -96,7 +96,7 @@ This command starts Oracle Free, mounts the dump directory, imports one bucket a
 
 ```yaml
 oracle:
-  image: gvenzl/oracle-free:23-slim
+  image: gvenzl/oracle-free:23-faststart
   max_stage_gb: 8
 default_hash_buckets: 64
 

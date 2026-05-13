@@ -111,7 +111,7 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
     dumpfile = "roundtrip_full.dmp"
 
     with DockerOracle.start(image=image, password=password) as container:
-        container.wait_ready(timeout_seconds=900)
+        container.wait_ready(timeout_seconds=120)
         admin = OracleAdminConnection(
             host="localhost",
             port=container.mapped_port(),

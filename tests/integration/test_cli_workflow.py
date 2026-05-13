@@ -55,7 +55,7 @@ def _export_cli_dump(tmp_path: Path, image: str, password: str) -> Path:
         password=password,
         mounts=((tmp_path, "/dumps", "rw"),),
     ) as container:
-        container.wait_ready(timeout_seconds=900)
+        container.wait_ready(timeout_seconds=120)
         admin = OracleAdminConnection(
             host="localhost",
             port=container.mapped_port(),
@@ -81,6 +81,14 @@ def _export_cli_dump(tmp_path: Path, image: str, password: str) -> Path:
                 include_schemas=("CLISRC",),
             )
         )
+        container.exec(
+            [
+                "bash",
+                "-lc",
+                "chmod a+r /dumps/cli_full.dmp /dumps/cli_full_export.log",
+            ],
+            check=False,
+        )
     return tmp_path / dumpfile
 
 
@@ -103,7 +111,7 @@ def test_cli_inspect_plan_convert_workflow(tmp_path: Path) -> None:
     config_path.write_text(
         """
 oracle:
-  image: gvenzl/oracle-free:23-slim
+  image: gvenzl/oracle-free:23-faststart
   max_stage_gb: 8
 default_hash_buckets: 4
 tables:

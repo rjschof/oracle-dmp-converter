@@ -35,7 +35,7 @@ def test_manifest_round_trip(tmp_path: Path) -> None:
 def test_plan_round_trip(tmp_path: Path) -> None:
     plan = ConversionPlan(
         dump_paths=("/tmp/full.dmp",),
-        oracle_image="gvenzl/oracle-free:23-slim",
+        oracle_image="gvenzl/oracle-free:23-faststart",
         max_stage_gb=8,
         tables=(
             TablePlan(

@@ -477,6 +477,15 @@ def export_dump(
                 include_schemas=SCHEMAS,
             )
         )
+        container.exec(
+            [
+                "bash",
+                "-lc",
+                f"chmod a+r {CONTAINER_DUMP_PATH}/{dumpfile} "
+                f"{CONTAINER_DUMP_PATH}/complex_full_export.log",
+            ],
+            check=False,
+        )
     if not (output_dir / dumpfile).exists():
         msg = f"Data Pump export completed but {output_dir / dumpfile} was not created"
         raise FileNotFoundError(msg)
@@ -522,7 +531,7 @@ def main() -> None:
         mounts=((output_dir, CONTAINER_DUMP_PATH, "rw"),),
     ) as container:
         print(f"Started Oracle container {container.name}; waiting for readiness...")
-        container.wait_ready(timeout_seconds=900)
+        container.wait_ready(timeout_seconds=120)
         admin = OracleAdminConnection(
             host="localhost",
             port=container.mapped_port(),

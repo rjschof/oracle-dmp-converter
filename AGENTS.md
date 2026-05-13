@@ -4,7 +4,7 @@
 - Python 3.12 package managed by `uv`; use `uv add` / `uv add --dev`, not direct `pip` edits.
 - CLI entrypoint is `dmp-to-parquet = dmp_to_parquet.cli:main` in `pyproject.toml`.
 - The tool supports Oracle Data Pump `expdp` dumps only; it deliberately does not parse proprietary `.dmp` files directly.
-- Default Oracle runtime image is `gvenzl/oracle-free:23-slim`; override with `DMP_TO_PARQUET_ORACLE_IMAGE` or CLI `--oracle-image`.
+- Default Oracle runtime image is `gvenzl/oracle-free:23-faststart`; override with `DMP_TO_PARQUET_ORACLE_IMAGE` or CLI `--oracle-image`.
 
 ## High-Value Files
 - `src/dmp_to_parquet/cli.py`: user-facing commands and Docker mount conventions.

@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-DEFAULT_ORACLE_IMAGE = "gvenzl/oracle-free:23-slim"
+DEFAULT_ORACLE_IMAGE = "gvenzl/oracle-free:23-faststart"
 
 
 @dataclass(frozen=True)
