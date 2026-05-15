@@ -8,30 +8,38 @@ from pathlib import Path
 
 import oracledb
 
-from dmp_to_parquet.datapump import DataPumpRunner
+from dmp_to_parquet.datapump.imp_show import parse_imp_indexfile_tables
+from dmp_to_parquet.datapump.legacy_parfile import (
+    LegacyConnection,
+    LegacyImportJob,
+    LegacyIndexFileJob,
+)
+from dmp_to_parquet.datapump.parfile import DataPumpConnection, ImportJob, SqlFileJob
+from dmp_to_parquet.datapump.runner import DataPumpRunner, is_legacy_format_error
+from dmp_to_parquet.datapump.sqlfile import parse_sqlfile_tables
 from dmp_to_parquet.docker_oracle import DockerOracle
-from dmp_to_parquet.exporter import export_table_to_parquet
-from dmp_to_parquet.identifiers import filesystem_safe_identifier
-from dmp_to_parquet.metadata import discover_table_metadata
+from dmp_to_parquet.errors import DataPumpError, LegacyDumpError
+from dmp_to_parquet.io.state import ChunkState, StateStore
 from dmp_to_parquet.models import (
     ChunkPlan,
     ConversionPlan,
+    DumpFormat,
     DumpManifest,
     TableMetadata,
     TablePlan,
     TableStrategy,
 )
-from dmp_to_parquet.oracle_conn import (
+from dmp_to_parquet.oracle.conn import (
     count_rows,
     drop_schema,
     drop_table,
     ensure_schema,
     oracle_connection,
 )
-from dmp_to_parquet.parfile import DataPumpConnection, ImportJob, SqlFileJob
+from dmp_to_parquet.oracle.exporter import export_table_to_parquet
+from dmp_to_parquet.oracle.identifiers import filesystem_safe_identifier
+from dmp_to_parquet.oracle.metadata import discover_table_metadata
 from dmp_to_parquet.planner import hash_bucket_query, null_bucket_query
-from dmp_to_parquet.sqlfile import parse_sqlfile_tables
-from dmp_to_parquet.state import ChunkState, StateStore
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,9 @@ class OracleDumpConverter:
         self.stage_schema = stage_schema
         self.stage_password = stage_password
         self.datapump = DataPumpRunner(container, work_dir / "parfiles")
+        # Set during discover_dump_tables(); defaults to DATAPUMP until
+        # detection runs.
+        self.dump_format: DumpFormat = DumpFormat.DATAPUMP
 
     def _connect(self) -> AbstractContextManager[oracledb.Connection]:
         return oracle_connection(
@@ -102,6 +113,17 @@ class OracleDumpConverter:
             user=self.admin.user,
             password=self.admin.password,
         )
+
+    def _legacy_connection(self) -> LegacyConnection:
+        return LegacyConnection(
+            user=self.admin.user,
+            password=self.admin.password,
+            service=self.admin.service,
+        )
+
+    def _legacy_files(self) -> tuple[str, ...]:
+        """Absolute paths to dump files inside the container."""
+        return tuple(f"{self.directory_path}/{f}" for f in self.dumpfiles)
 
     def prepare_stage_schema(self) -> None:
         with self._connect() as conn:
@@ -115,20 +137,69 @@ class OracleDumpConverter:
         self.prepare_stage_schema()
         with self._connect() as conn:
             drop_table(conn, self.stage_schema, table)
-        job = ImportJob(
-            connection=DataPumpConnection(self.admin.user, self.admin.password, self.admin.service),
-            directory=self.directory,
-            dumpfiles=self.dumpfiles,
-            logfile=f"metadata-{source_schema}-{table}.log"[:120],
-            source_schema=source_schema,
-            table=table,
-            remap_schema=(source_schema, self.stage_schema),
-            content="METADATA_ONLY",
-            exclude=("INDEX", "REF_CONSTRAINT", "TRIGGER"),
+
+        if self.dump_format == DumpFormat.LEGACY:
+            job = LegacyImportJob(
+                connection=self._legacy_connection(),
+                files=self._legacy_files(),
+                logfile=f"imp-meta-{source_schema}-{table}.log"[:120],
+                fromuser=source_schema,
+                touser=self.stage_schema,
+                tables=(table,),
+                rows=False,
+                indexes=False,
+                grants=False,
+                constraints=False,
+            )
+            self.datapump.run_imp(job)
+        else:
+            job = ImportJob(
+                connection=DataPumpConnection(
+                    self.admin.user, self.admin.password, self.admin.service
+                ),
+                directory=self.directory,
+                dumpfiles=self.dumpfiles,
+                logfile=f"metadata-{source_schema}-{table}.log"[:120],
+                source_schema=source_schema,
+                table=table,
+                remap_schema=(source_schema, self.stage_schema),
+                content="METADATA_ONLY",
+                exclude=("INDEX", "REF_CONSTRAINT", "TRIGGER"),
+            )
+            self.datapump.run_impdp(job)
+
+    def _discover_legacy_dump_tables(self) -> tuple[tuple[str, str], ...]:
+        """Discover tables in a legacy ``exp`` dump via ``imp INDEXFILE=``."""
+        indexfile = "dmp2parquet-legacy-discovery.sql"
+        remote_indexfile = f"/tmp/{indexfile}"
+        job = LegacyIndexFileJob(
+            connection=self._legacy_connection(),
+            files=self._legacy_files(),
+            logfile="dmp2parquet-legacy-discovery.log",
+            indexfile=remote_indexfile,
+            full=True,
         )
-        self.datapump.run_impdp(job)
+        sql_text = self.datapump.run_imp_indexfile(job)
+
+        if not sql_text:
+            # Fall back to reading from the directory path as well (some Oracle
+            # versions write the indexfile there instead of /tmp).
+            alt = self.container.exec(["cat", f"{self.directory_path}/{indexfile}"], check=False)
+            sql_text = alt.stdout if alt.returncode == 0 else ""
+
+        return parse_imp_indexfile_tables(sql_text)
 
     def discover_dump_tables(self) -> tuple[tuple[str, str], ...]:
+        """Discover tables in the dump, auto-detecting exp vs expdp format.
+
+        Tries ``impdp SQLFILE=`` first.  If the output contains
+        ``ORA-39142`` (incompatible dump-file version) or ``ORA-39143``
+        ("The file may be an original export dump file" — emitted by 23ai
+        Free), the dump was produced by legacy ``exp``; we set
+        :attr:`dump_format` to
+        :attr:`~dmp_to_parquet.models.DumpFormat.LEGACY` and fall back to
+        ``imp INDEXFILE=``.  Any other ``impdp`` failure is re-raised as-is.
+        """
         sqlfile = "dmp2parquet-discovery.sql"
         job = SqlFileJob(
             connection=DataPumpConnection(self.admin.user, self.admin.password, self.admin.service),
@@ -137,7 +208,17 @@ class OracleDumpConverter:
             logfile="dmp2parquet-discovery.log",
             sqlfile=sqlfile,
         )
-        self.datapump.run_sqlfile(job)
+        try:
+            self.datapump.run_sqlfile(job)
+        except DataPumpError as exc:
+            if not is_legacy_format_error(str(exc)):
+                raise
+            # Legacy exp dump — switch to imp-based workflow.
+            self.dump_format = DumpFormat.LEGACY
+            raise LegacyDumpError(str(exc)) from exc
+
+        # Data Pump succeeded — read the SQLFILE output.
+        self.dump_format = DumpFormat.DATAPUMP
         result = self.container.exec(["cat", f"{self.directory_path}/{sqlfile}"], check=False)
         sql_text = result.stdout if result.returncode == 0 else ""
         if not sql_text:
@@ -149,7 +230,7 @@ class OracleDumpConverter:
                         "for path in "
                         f"{self.directory_path}/{sqlfile} "
                         f"{self.directory_path}/*/{sqlfile}; do "
-                        "[ -f \"$path\" ] && cat \"$path\"; "
+                        '[ -f "$path" ] && cat "$path"; '
                         "done"
                     ),
                 ],
@@ -159,8 +240,20 @@ class OracleDumpConverter:
         return parse_sqlfile_tables(sql_text)
 
     def inspect_dump(self) -> DumpManifest:
+        """Inspect the dump, auto-detecting format, and return a manifest.
+
+        When the dump is a legacy ``exp`` file, :attr:`dump_format` is set
+        to :attr:`~dmp_to_parquet.models.DumpFormat.LEGACY` and ``imp``
+        is used for all subsequent operations.
+        """
+        # First pass: try Data Pump path; on LegacyDumpError switch to imp.
+        try:
+            schema_tables = self.discover_dump_tables()
+        except LegacyDumpError:
+            schema_tables = self._discover_legacy_dump_tables()
+
         tables: list[TableMetadata] = []
-        for source_schema, table in self.discover_dump_tables():
+        for source_schema, table in schema_tables:
             self._metadata_import_table(source_schema, table)
             try:
                 with self._connect() as conn:
@@ -179,7 +272,11 @@ class OracleDumpConverter:
                 )
             finally:
                 self.drop_stage_table(table)
-        return DumpManifest(dump_paths=self.dumpfiles, tables=tuple(tables))
+        return DumpManifest(
+            dump_paths=self.dumpfiles,
+            tables=tuple(tables),
+            dump_format=self.dump_format,
+        )
 
     def import_table_chunk(
         self,
@@ -192,18 +289,40 @@ class OracleDumpConverter:
     ) -> int:
         with self._connect() as conn:
             drop_table(conn, self.stage_schema, table)
-        job = ImportJob(
-            connection=DataPumpConnection(self.admin.user, self.admin.password, self.admin.service),
-            directory=self.directory,
-            dumpfiles=self.dumpfiles,
-            logfile=f"impdp-{source_schema}-{table}-{chunk_name}.log"[:120],
-            source_schema=source_schema,
-            table=table,
-            remap_schema=(source_schema, self.stage_schema),
-            query=query,
-            partition_name=partition_name,
-        )
-        self.datapump.run_impdp(job)
+
+        if self.dump_format == DumpFormat.LEGACY:
+            # Legacy imp does not support QUERY= or partition-level imports.
+            # query / partition_name are silently ignored here; the planner
+            # must not produce HASH or PARTITION chunks for legacy dumps.
+            job = LegacyImportJob(
+                connection=self._legacy_connection(),
+                files=self._legacy_files(),
+                logfile=f"imp-{source_schema}-{table}-{chunk_name}.log"[:120],
+                fromuser=source_schema,
+                touser=self.stage_schema,
+                tables=(table,),
+                rows=True,
+                indexes=False,
+                grants=False,
+                constraints=False,
+            )
+            self.datapump.run_imp(job)
+        else:
+            job = ImportJob(
+                connection=DataPumpConnection(
+                    self.admin.user, self.admin.password, self.admin.service
+                ),
+                directory=self.directory,
+                dumpfiles=self.dumpfiles,
+                logfile=f"impdp-{source_schema}-{table}-{chunk_name}.log"[:120],
+                source_schema=source_schema,
+                table=table,
+                remap_schema=(source_schema, self.stage_schema),
+                query=query,
+                partition_name=partition_name,
+            )
+            self.datapump.run_impdp(job)
+
         with self._connect() as conn:
             return count_rows(conn, self.stage_schema, table)
 

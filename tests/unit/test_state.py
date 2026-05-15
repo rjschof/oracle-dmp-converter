@@ -1,4 +1,4 @@
-from dmp_to_parquet.state import ChunkState, StateStore
+from dmp_to_parquet.io.state import ChunkState, StateStore
 
 
 def test_state_store_upserts_and_reads_chunk_state(tmp_path) -> None:  # type: ignore[no-untyped-def]

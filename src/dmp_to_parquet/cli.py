@@ -11,11 +11,11 @@ from rich.console import Console
 from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE, load_config
 from dmp_to_parquet.converter import OracleAdminConnection, OracleDumpConverter
 from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
+from dmp_to_parquet.io.serialization import load_manifest, load_plan, save_manifest, save_plan
+from dmp_to_parquet.io.state import StateStore
 from dmp_to_parquet.models import ConversionPlan
-from dmp_to_parquet.oracle_conn import create_directory, oracle_connection
+from dmp_to_parquet.oracle.conn import create_directory, oracle_connection
 from dmp_to_parquet.planner import plan_tables
-from dmp_to_parquet.serialization import load_manifest, load_plan, save_manifest, save_plan
-from dmp_to_parquet.state import StateStore
 
 console = Console()
 DEFAULT_DUMP_DIRECTORY = "DMP2PARQUET_DUMP"
@@ -199,8 +199,7 @@ def plan_command(
     save_plan(plan_path, plan)
     unsupported = [table for table in table_plans if table.reason]
     console.print(
-        f"[green]Wrote plan for {len(table_plans)} tables "
-        f"({len(unsupported)} unsupported)[/green]"
+        f"[green]Wrote plan for {len(table_plans)} tables ({len(unsupported)} unsupported)[/green]"
     )
 
 
@@ -286,8 +285,7 @@ def convert(
         finally:
             state_store.close()
         console.print(
-            f"[green]Converted {result.rows} rows across "
-            f"{len(result.tables)} tables[/green]"
+            f"[green]Converted {result.rows} rows across {len(result.tables)} tables[/green]"
         )
 
 
@@ -375,6 +373,5 @@ def convert_hash_table(
             output_dir=output_dir,
         )
         console.print(
-            f"[green]Converted {result.rows} rows from "
-            f"{source_schema}.{table_name}[/green]"
+            f"[green]Converted {result.rows} rows from {source_schema}.{table_name}[/green]"
         )

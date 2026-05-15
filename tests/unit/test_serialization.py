@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from dmp_to_parquet.io.serialization import load_manifest, load_plan, save_manifest, save_plan
 from dmp_to_parquet.models import (
     ChunkPlan,
     ColumnMetadata,
@@ -9,7 +10,6 @@ from dmp_to_parquet.models import (
     TablePlan,
     TableStrategy,
 )
-from dmp_to_parquet.serialization import load_manifest, load_plan, save_manifest, save_plan
 
 
 def test_manifest_round_trip(tmp_path: Path) -> None:

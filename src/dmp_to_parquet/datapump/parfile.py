@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from dmp_to_parquet.identifiers import oracle_identifier
+from dmp_to_parquet.oracle.identifiers import oracle_identifier
 
 
 @dataclass(frozen=True)

@@ -33,5 +33,14 @@ class DataPumpError(DmpToParquetError):
     """Raised when expdp or impdp fails."""
 
 
+class LegacyDumpError(DataPumpError):
+    """Raised when a dump file is identified as a legacy exp format.
+
+    This is a subclass of DataPumpError so callers that only catch
+    DataPumpError still handle it correctly.  Callers that need to
+    distinguish the legacy-format case can catch LegacyDumpError first.
+    """
+
+
 class PlanningError(DmpToParquetError):
     """Raised when a table cannot be planned safely."""

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 import oracledb
 
-from dmp_to_parquet.identifiers import oracle_identifier, oracle_qualified_name
+from dmp_to_parquet.oracle.identifiers import oracle_identifier, oracle_qualified_name
 
 
 @contextmanager
@@ -67,9 +67,7 @@ def ensure_schema(conn: oracledb.Connection, schema: str, password: str) -> None
 def create_directory(conn: oracledb.Connection, name: str, path: str) -> None:
     escaped_path = path.replace("'", "''")
     with conn.cursor() as cursor:
-        cursor.execute(
-            f"CREATE OR REPLACE DIRECTORY {oracle_identifier(name)} AS '{escaped_path}'"
-        )
+        cursor.execute(f"CREATE OR REPLACE DIRECTORY {oracle_identifier(name)} AS '{escaped_path}'")
     conn.commit()
 
 

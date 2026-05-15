@@ -12,6 +12,7 @@ from dmp_to_parquet.models import (
     ChunkPlan,
     ColumnMetadata,
     ConversionPlan,
+    DumpFormat,
     DumpManifest,
     PartitionMetadata,
     TableMetadata,
@@ -132,6 +133,7 @@ def save_manifest(path: Path, manifest: DumpManifest) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": manifest.version,
+        "dump_format": manifest.dump_format.value,
         "dump_paths": list(manifest.dump_paths),
         "tables": [table_metadata_to_dict(table) for table in manifest.tables],
     }
@@ -140,8 +142,10 @@ def save_manifest(path: Path, manifest: DumpManifest) -> None:
 
 def load_manifest(path: Path) -> DumpManifest:
     data = json.loads(path.read_text())
+    raw_format = data.get("dump_format", DumpFormat.DATAPUMP.value)
     return DumpManifest(
         version=int(data.get("version", 1)),
+        dump_format=DumpFormat(raw_format),
         dump_paths=tuple(data.get("dump_paths", [])),
         tables=tuple(table_metadata_from_dict(table) for table in data.get("tables", [])),
     )

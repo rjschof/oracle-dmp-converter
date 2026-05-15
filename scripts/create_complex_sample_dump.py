@@ -20,15 +20,15 @@ import yaml
 
 from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE
 from dmp_to_parquet.converter import OracleAdminConnection
-from dmp_to_parquet.datapump import DataPumpRunner
+from dmp_to_parquet.datapump.parfile import DataPumpConnection, ExportJob
+from dmp_to_parquet.datapump.runner import DataPumpRunner
 from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
-from dmp_to_parquet.oracle_conn import (
+from dmp_to_parquet.oracle.conn import (
     create_directory,
     drop_schema,
     ensure_schema,
     oracle_connection,
 )
-from dmp_to_parquet.parfile import DataPumpConnection, ExportJob
 
 SCHEMAS = ("D2P_APP", "D2P_SALES", "D2P_DOCS")
 PASSWORD = "SamplePwd_123"
@@ -441,17 +441,17 @@ Try it:
 ```bash
 uv run dmp-to-parquet inspect \\
   --dump {output_dir / dumpfile} \\
-  --work-dir {output_dir / 'work'} \\
-  --output {output_dir / 'work' / 'manifest.json'}
+  --work-dir {output_dir / "work"} \\
+  --output {output_dir / "work" / "manifest.json"}
 
 uv run dmp-to-parquet plan \\
-  --manifest {output_dir / 'work' / 'manifest.json'} \\
-  --config {output_dir / 'config.yaml'} \\
-  --output {output_dir / 'work' / 'plan.yaml'}
+  --manifest {output_dir / "work" / "manifest.json"} \\
+  --config {output_dir / "config.yaml"} \\
+  --output {output_dir / "work" / "plan.yaml"}
 
 uv run dmp-to-parquet convert \\
-  --plan {output_dir / 'work' / 'plan.yaml'} \\
-  --output {output_dir / 'parquet'}
+  --plan {output_dir / "work" / "plan.yaml"} \\
+  --output {output_dir / "parquet"}
 ```
 """
     )

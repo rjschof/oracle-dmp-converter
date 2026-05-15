@@ -10,11 +10,11 @@ from click.testing import CliRunner
 from dmp_to_parquet.cli import main
 from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE
 from dmp_to_parquet.converter import OracleAdminConnection
-from dmp_to_parquet.datapump import DataPumpRunner
+from dmp_to_parquet.datapump.parfile import DataPumpConnection, ExportJob
+from dmp_to_parquet.datapump.runner import DataPumpRunner
 from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
-from dmp_to_parquet.oracle_conn import create_directory, drop_schema, oracle_connection
-from dmp_to_parquet.parfile import DataPumpConnection, ExportJob
-from dmp_to_parquet.validation import count_parquet_rows
+from dmp_to_parquet.io.validation import count_parquet_rows
+from dmp_to_parquet.oracle.conn import create_directory, drop_schema, oracle_connection
 
 pytestmark = pytest.mark.integration
 

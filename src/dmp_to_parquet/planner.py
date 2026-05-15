@@ -5,8 +5,15 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from dmp_to_parquet.config import ConverterConfig, TableOverride, table_override
-from dmp_to_parquet.identifiers import oracle_identifier
-from dmp_to_parquet.models import ChunkPlan, ColumnMetadata, TableMetadata, TablePlan, TableStrategy
+from dmp_to_parquet.models import (
+    ChunkPlan,
+    ColumnMetadata,
+    DumpFormat,
+    TableMetadata,
+    TablePlan,
+    TableStrategy,
+)
+from dmp_to_parquet.oracle.identifiers import oracle_identifier
 
 
 def hash_bucket_query(split_column: str, bucket_index: int, bucket_count: int) -> str:
@@ -66,7 +73,11 @@ def choose_split_column(
     return None
 
 
-def plan_table(table: TableMetadata, config: ConverterConfig) -> TablePlan:
+def plan_table(
+    table: TableMetadata,
+    config: ConverterConfig,
+    dump_format: DumpFormat = DumpFormat.DATAPUMP,
+) -> TablePlan:
     override = table_override(config, table.schema, table.name)
 
     if override and override.strategy == "whole":
@@ -83,8 +94,35 @@ def plan_table(table: TableMetadata, config: ConverterConfig) -> TablePlan:
             table=table.name,
             strategy=TableStrategy.UNSUPPORTED,
             reason=(
-                "range planning requires explicit range boundaries; "
-                "only hash chunking is automated"
+                "range planning requires explicit range boundaries; only hash chunking is automated"
+            ),
+        )
+
+    # Legacy exp dumps cannot be hash-chunked (no QUERY= support in imp) and
+    # do not support reliable partition-level imports.  Restrict to
+    # WHOLE_TABLE; tables that exceed the staging limit are UNSUPPORTED.
+    if dump_format == DumpFormat.LEGACY:
+        force_large = bool(override and override.force_large)
+        if not force_large and (
+            table.estimated_bytes is None or table.estimated_bytes <= config.max_stage_bytes
+        ):
+            warnings: tuple[str, ...] = ()
+            if table.estimated_bytes is None:
+                warnings = ("table size is unknown; planning whole-table import",)
+            return TablePlan(
+                schema=table.schema,
+                table=table.name,
+                strategy=TableStrategy.WHOLE_TABLE,
+                chunks=(ChunkPlan(name="whole", strategy=TableStrategy.WHOLE_TABLE),),
+                warnings=warnings,
+            )
+        return TablePlan(
+            schema=table.schema,
+            table=table.name,
+            strategy=TableStrategy.UNSUPPORTED,
+            reason=(
+                "table exceeds staging limit and legacy exp dumps do not support "
+                "hash chunking; re-export with expdp to enable hash-chunked conversion"
             ),
         )
 
@@ -105,11 +143,10 @@ def plan_table(table: TableMetadata, config: ConverterConfig) -> TablePlan:
         )
 
     force_large = bool(override and override.force_large)
-    if (
-        not force_large
-        and (table.estimated_bytes is None or table.estimated_bytes <= config.max_stage_bytes)
+    if not force_large and (
+        table.estimated_bytes is None or table.estimated_bytes <= config.max_stage_bytes
     ):
-        warnings: tuple[str, ...] = ()
+        warnings = ()
         if table.estimated_bytes is None:
             warnings = ("table size is unknown; planning whole-table import",)
         return TablePlan(
@@ -170,5 +207,9 @@ def plan_table(table: TableMetadata, config: ConverterConfig) -> TablePlan:
     )
 
 
-def plan_tables(tables: Iterable[TableMetadata], config: ConverterConfig) -> tuple[TablePlan, ...]:
-    return tuple(plan_table(table, config) for table in tables)
+def plan_tables(
+    tables: Iterable[TableMetadata],
+    config: ConverterConfig,
+    dump_format: DumpFormat = DumpFormat.DATAPUMP,
+) -> tuple[TablePlan, ...]:
+    return tuple(plan_table(table, config, dump_format) for table in tables)

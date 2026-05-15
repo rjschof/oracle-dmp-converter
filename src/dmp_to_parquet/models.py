@@ -15,6 +15,11 @@ class TableStrategy(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class DumpFormat(StrEnum):
+    DATAPUMP = "datapump"
+    LEGACY = "legacy"
+
+
 @dataclass(frozen=True)
 class ColumnMetadata:
     name: str
@@ -107,6 +112,7 @@ class DumpManifest:
     dump_paths: tuple[str, ...]
     tables: tuple[TableMetadata, ...]
     version: int = 1
+    dump_format: DumpFormat = DumpFormat.DATAPUMP
 
 
 @dataclass(frozen=True)

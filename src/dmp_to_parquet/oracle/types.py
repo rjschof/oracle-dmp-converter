@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dmp_to_parquet.config import ColumnOverride
-from dmp_to_parquet.identifiers import oracle_identifier
 from dmp_to_parquet.models import ColumnMetadata
+from dmp_to_parquet.oracle.identifiers import oracle_identifier
 
 STRING_TYPES = {"CHAR", "NCHAR", "VARCHAR2", "NVARCHAR2", "CLOB", "NCLOB", "LONG"}
 BINARY_TYPES = {"RAW", "LONG RAW", "BLOB"}

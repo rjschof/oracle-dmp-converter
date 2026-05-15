@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from dmp_to_parquet.metadata import ORACLE_MAINTAINED_SCHEMAS
+from dmp_to_parquet.oracle.metadata import ORACLE_MAINTAINED_SCHEMAS
 
 _CREATE_TABLE_RE = re.compile(
     r"\bCREATE\s+(?:GLOBAL\s+TEMPORARY\s+|PRIVATE\s+TEMPORARY\s+)?TABLE\s+"

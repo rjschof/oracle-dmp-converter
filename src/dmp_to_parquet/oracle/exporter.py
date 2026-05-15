@@ -13,9 +13,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from dmp_to_parquet.config import ColumnOverride
-from dmp_to_parquet.identifiers import oracle_identifier, oracle_qualified_name
 from dmp_to_parquet.models import ColumnMetadata
-from dmp_to_parquet.oracle_types import export_expression, parquet_type_name
+from dmp_to_parquet.oracle.identifiers import oracle_identifier, oracle_qualified_name
+from dmp_to_parquet.oracle.types import export_expression, parquet_type_name
 
 
 @dataclass(frozen=True)

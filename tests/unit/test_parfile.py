@@ -1,4 +1,4 @@
-from dmp_to_parquet.parfile import (
+from dmp_to_parquet.datapump.parfile import (
     DataPumpConnection,
     ExportJob,
     ImportJob,
@@ -18,7 +18,7 @@ def test_export_parfile_full_dump_with_schema_include() -> None:
         )
     )
     assert "FULL=Y" in text
-    assert 'INCLUDE=SCHEMA:"IN (\'SRC\')"' in text
+    assert "INCLUDE=SCHEMA:\"IN ('SRC')\"" in text
 
 
 def test_import_parfile_hash_query() -> None:

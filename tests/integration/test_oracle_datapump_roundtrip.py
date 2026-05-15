@@ -8,14 +8,14 @@ import pytest
 
 from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, TableOverride
 from dmp_to_parquet.converter import OracleAdminConnection, OracleDumpConverter
-from dmp_to_parquet.datapump import DataPumpRunner
+from dmp_to_parquet.datapump.parfile import DataPumpConnection, ExportJob
+from dmp_to_parquet.datapump.runner import DataPumpRunner
 from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
+from dmp_to_parquet.io.state import StateStore
+from dmp_to_parquet.io.validation import count_parquet_rows
 from dmp_to_parquet.models import ConversionPlan, TableStrategy
-from dmp_to_parquet.oracle_conn import drop_schema, oracle_connection, table_exists
-from dmp_to_parquet.parfile import DataPumpConnection, ExportJob
+from dmp_to_parquet.oracle.conn import drop_schema, oracle_connection, table_exists
 from dmp_to_parquet.planner import plan_tables
-from dmp_to_parquet.state import StateStore
-from dmp_to_parquet.validation import count_parquet_rows
 
 pytestmark = pytest.mark.integration
 
