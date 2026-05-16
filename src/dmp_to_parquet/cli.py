@@ -278,7 +278,7 @@ def convert(
             save_manifest(work_dir / "manifest.json", manifest)
             save_plan(work_dir / "plan.yaml", plan)
         converter.dump_format = plan.dump_format
-        state_store = StateStore(work_dir / "state.sqlite")
+        state_store = StateStore(work_dir / "convert" / "state.sqlite")
         try:
             result = converter.convert_plan(plan, output_dir, state_store)
         finally:

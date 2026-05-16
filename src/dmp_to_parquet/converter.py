@@ -103,7 +103,8 @@ class OracleDumpConverter:
         self.directory = directory
         self.directory_path = directory_path.rstrip("/")
         self.stage_password = stage_password
-        self.datapump = DataPumpRunner(container, work_dir / "parfiles")
+        self._inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")
+        self._convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")
         # Set during discover_dump_tables(); defaults to DATAPUMP until
         # detection runs.
         self.dump_format: DumpFormat = DumpFormat.DATAPUMP
@@ -168,7 +169,7 @@ class OracleDumpConverter:
                 grants=False,
                 constraints=False,
             )
-            self.datapump.run_imp(job)
+            self._inspect_runner.run_imp(job)
         else:
             job = ImportJob(
                 connection=DataPumpConnection(
@@ -183,7 +184,7 @@ class OracleDumpConverter:
                 content="METADATA_ONLY",
                 exclude=("INDEX", "REF_CONSTRAINT", "TRIGGER"),
             )
-            self.datapump.run_impdp(job)
+            self._inspect_runner.run_impdp(job)
 
     def _discover_legacy_dump_tables(self) -> tuple[tuple[str, str], ...]:
         """Discover tables in a legacy ``exp`` dump via ``imp INDEXFILE=``."""
@@ -196,7 +197,7 @@ class OracleDumpConverter:
             indexfile=remote_indexfile,
             full=True,
         )
-        sql_text = self.datapump.run_imp_indexfile(job)
+        sql_text = self._inspect_runner.run_imp_indexfile(job)
 
         if not sql_text:
             # Fall back to reading from the directory path as well (some Oracle
@@ -226,7 +227,7 @@ class OracleDumpConverter:
             sqlfile=sqlfile,
         )
         try:
-            self.datapump.run_sqlfile(job)
+            self._inspect_runner.run_sqlfile(job)
         except DataPumpError as exc:
             if not is_legacy_format_error(str(exc)):
                 raise
@@ -327,7 +328,7 @@ class OracleDumpConverter:
                 grants=False,
                 constraints=False,
             )
-            self.datapump.run_imp(job)
+            self._convert_runner.run_imp(job)
         else:
             job = ImportJob(
                 connection=DataPumpConnection(
@@ -342,7 +343,7 @@ class OracleDumpConverter:
                 query=query,
                 partition_name=partition_name,
             )
-            self.datapump.run_impdp(job)
+            self._convert_runner.run_impdp(job)
 
         with self._connect() as conn:
             return count_rows(conn, stage_schema, table)

@@ -173,7 +173,7 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
             oracle_image=image,
             max_stage_gb=8,
         )
-        state = StateStore(tmp_path / "work" / "state.sqlite")
+        state = StateStore(tmp_path / "work" / "convert" / "state.sqlite")
         try:
             result = converter.convert_plan(plan, tmp_path / "parquet", state)
         finally:

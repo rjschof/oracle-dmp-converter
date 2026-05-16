@@ -228,7 +228,7 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
             oracle_image=image,
             max_stage_gb=8,
         )
-        state = StateStore(work_dir / "state.sqlite")
+        state = StateStore(work_dir / "convert" / "state.sqlite")
         try:
             result = converter.convert_plan(plan, parquet_dir, state)
         finally:
@@ -360,7 +360,7 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
             oracle_image=image,
             max_stage_gb=8,
         )
-        state = StateStore(work_dir / "state.sqlite")
+        state = StateStore(work_dir / "convert" / "state.sqlite")
         try:
             result = converter.convert_plan(plan, parquet_dir, state)
         finally:
