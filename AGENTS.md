@@ -2,9 +2,11 @@
 
 ## Project Basics
 - Python 3.12 package managed by `uv`; use `uv add` / `uv add --dev`, not direct `pip` edits.
+- **Src-layout**: package lives at `src/dmp_to_parquet/`, not at the repo root.
 - CLI entrypoint is `dmp-to-parquet = dmp_to_parquet.cli:main` in `pyproject.toml`.
 - The tool supports both Oracle Data Pump (`expdp`) and legacy (`exp`) dumps; it deliberately does not parse proprietary `.dmp` files directly.
 - Default Oracle runtime image is `gvenzl/oracle-free:23-faststart`; override with `DMP_TO_PARQUET_ORACLE_IMAGE` or CLI `--oracle-image`.
+- Override Docker `--platform` with `DMP_TO_PARQUET_DOCKER_PLATFORM` (e.g. `linux/amd64` on Apple Silicon).
 
 ## Package Structure
 The package uses three subpackages; `__init__.py` files are empty — always import via the full submodule path, never from the subpackage root.
@@ -15,27 +17,64 @@ The package uses three subpackages; `__init__.py` files are empty — always imp
 - `scripts/create_complex_sample_dump.py` and `scripts/create_legacy_exp_sample.py`: standalone sample-data generators; keep out of the product CLI.
 
 ## Commands
+- Initial setup: `make setup` (runs `uv sync --all-groups`)
 - Unit tests: `uv run python -m pytest tests/unit` (`uv run pytest` fails — pytest is not on PATH)
 - Integration tests: `uv run python -m pytest tests/integration`
 - Full tests: `uv run python -m pytest`
 - Format/fix: `make format`
 - Ruff check: `make format-check`
-- Pylint: `make lint`
+- Pylint: `make lint` (lints `src scripts tests`, not just `src`)
 - Local prerequisite check: `uv run dmp-to-parquet doctor`
+- No typecheck target — no mypy/pyright configured.
 
 ## Docker / Oracle Testing Gotchas
 - Integration tests start real Oracle Free containers and run real `expdp` / `impdp`; expect minutes, not seconds.
 - Docker must be running; tests skip if unavailable, but CLI commands fail fast via `doctor`.
 - If an integration run is interrupted, check `docker ps --format '{{.Names}}'` for `dmp2parquet-*` containers and stop leftovers.
 - Tests and CLI mount dump directories into containers; all `--dump` files must be in the same host directory.
+- `DockerOracle.exec()` uses `subprocess.run(["docker", "exec", ...])`, not the Docker SDK's `exec_run()` — SDK's chunked HTTP stream never sends EOF when the container stops mid-exec.
 
 ## Conversion Workflow
 - Normal flow is `inspect -> plan -> convert`, producing `manifest.json`, `plan.yaml`, Parquet output, and `state.sqlite`.
 - Full-dump discovery uses Data Pump `SQLFILE`; table metadata comes from `CONTENT=METADATA_ONLY` imports into a staging schema.
+- Staging schema naming: source schema `APP` is imported as `DMP_APP` (prefix is `DMP_`).
 - Legacy `exp` format is auto-detected: `impdp SQLFILE=` is tried first; if `ORA-39142` or `ORA-39143` appears in the output, the converter falls back to `imp INDEXFILE=`. Oracle 23ai Free emits `ORA-39143`; older versions emit `ORA-39142`.
 - Legacy dumps use whole-table strategy only — `imp` has no `QUERY=` support, so hash chunking is unavailable.
 - Large unpartitioned tables need a usable scalar split column for hash chunking; `ROWID` is not a pre-import split strategy.
 - Hash chunking uses Data Pump `QUERY` plus `ORA_HASH`; nullable split columns get an extra null bucket.
+- `range` strategy is **not implemented** — `plan_table()` returns `UNSUPPORTED` for it immediately.
+
+## Planner: Hash Column Eligibility
+Types that are **never** hash candidates: `BFILE`, `BLOB`, `CLOB`, `LONG`, `LONG RAW`, `NCLOB`, `RAW`, `ROWID`, `UROWID`, `XMLTYPE`.
+Preference order: (1) single-col primary key, (2) single-col unique key, (3) non-nullable scalar, (4) nullable scalar.
+
+## Output Structure
+Parquet files land at `<output_dir>/<schema>/<table>/<chunk>.parquet` where names are lowercased and non-alphanumeric chars replaced with `_`.
+- Whole-table chunk: `whole.parquet`
+- Hash chunks: `hash-00000-of-00064.parquet` (zero-padded 5 digits) + `hash-null.parquet` for null bucket
+- Partition chunks: `partition-00001-<PARTITION_NAME>.parquet`
+
+## Config File (YAML, `--config`)
+```yaml
+oracle:
+  image: gvenzl/oracle-free:23-faststart
+  max_stage_gb: 8          # default staging size limit
+
+default_hash_buckets: 64   # global default; override per table
+
+tables:
+  SCHEMA.TABLE:
+    strategy: hash | whole  # range is unsupported
+    split_column: COLUMN_NAME
+    buckets: 256
+    force_large: true       # bypass staging size check
+
+columns:
+  SCHEMA.TABLE.COLUMN:
+    expression: "SDO_UTIL.TO_WKTGEOMETRY({column})"
+    parquet_type: string
+```
+Keys are looked up case-insensitively (exact match, then `.upper()`).
 
 ## Sample Dumps
 - Generate complex (Data Pump) sample data: `uv run python scripts/create_complex_sample_dump.py --force` → `sample-data/complex/`
