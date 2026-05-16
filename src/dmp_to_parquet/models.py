@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TableStrategy(StrEnum):
@@ -121,5 +124,5 @@ class ConversionPlan:
     tables: tuple[TablePlan, ...]
     oracle_image: str
     max_stage_gb: int
-    stage_schema: str = "DMP_STAGE"
     version: int = 1
+    dump_format: DumpFormat = DumpFormat.DATAPUMP

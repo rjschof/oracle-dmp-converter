@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal
@@ -16,6 +17,8 @@ from dmp_to_parquet.config import ColumnOverride
 from dmp_to_parquet.models import ColumnMetadata
 from dmp_to_parquet.oracle.identifiers import oracle_identifier, oracle_qualified_name
 from dmp_to_parquet.oracle.types import export_expression, parquet_type_name
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

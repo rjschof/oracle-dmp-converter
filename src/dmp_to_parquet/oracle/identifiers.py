@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from urllib.parse import quote
+
+LOGGER = logging.getLogger(__name__)
 
 _SIMPLE_ORACLE_IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
 

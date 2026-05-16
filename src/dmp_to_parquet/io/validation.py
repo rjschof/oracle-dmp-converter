@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
 import pyarrow.parquet as pq
+
+LOGGER = logging.getLogger(__name__)
 
 
 def count_parquet_rows(paths: Iterable[Path]) -> int:

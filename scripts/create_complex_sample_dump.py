@@ -9,6 +9,7 @@ This is intentionally outside the dmp-to-parquet CLI. Run it with:
 from __future__ import annotations
 
 import argparse
+import logging
 import tempfile
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
@@ -30,7 +31,9 @@ from dmp_to_parquet.oracle.conn import (
     oracle_connection,
 )
 
-SCHEMAS = ("D2P_APP", "D2P_SALES", "D2P_DOCS")
+LOGGER = logging.getLogger(__name__)
+
+SCHEMAS = ("APP", "SALES", "DOCS")
 PASSWORD = "SamplePwd_123"
 DUMP_DIRECTORY = "D2P_SAMPLE_DUMP"
 CONTAINER_DUMP_PATH = "/sample-dump"
@@ -143,7 +146,7 @@ def create_tables(conn: oracledb.Connection) -> None:
         conn,
         (
             """
-            CREATE TABLE D2P_APP.CUSTOMERS (
+            CREATE TABLE APP.CUSTOMERS (
                 CUSTOMER_ID NUMBER(10, 0) NOT NULL,
                 CUSTOMER_CODE VARCHAR2(20) NOT NULL,
                 FULL_NAME NVARCHAR2(120),
@@ -158,7 +161,7 @@ def create_tables(conn: oracledb.Connection) -> None:
             )
             """,
             """
-            CREATE TABLE D2P_APP.ACCOUNT_SETTINGS (
+            CREATE TABLE APP.ACCOUNT_SETTINGS (
                 SETTING_ID NUMBER(10, 0) NOT NULL,
                 CUSTOMER_ID NUMBER(10, 0) NOT NULL,
                 SETTING_KEY VARCHAR2(40) NOT NULL,
@@ -168,7 +171,7 @@ def create_tables(conn: oracledb.Connection) -> None:
             )
             """,
             """
-            CREATE TABLE D2P_SALES.ORDERS (
+            CREATE TABLE SALES.ORDERS (
                 ORDER_ID NUMBER(12, 0) NOT NULL,
                 CUSTOMER_ID NUMBER(10, 0) NOT NULL,
                 ORDER_DATE DATE NOT NULL,
@@ -186,7 +189,7 @@ def create_tables(conn: oracledb.Connection) -> None:
             )
             """,
             """
-            CREATE TABLE D2P_SALES.ORDER_ITEMS (
+            CREATE TABLE SALES.ORDER_ITEMS (
                 ITEM_ID NUMBER(12, 0) NOT NULL,
                 ORDER_ID NUMBER(12, 0) NOT NULL,
                 SKU VARCHAR2(40) NOT NULL,
@@ -197,7 +200,7 @@ def create_tables(conn: oracledb.Connection) -> None:
             )
             """,
             """
-            CREATE TABLE D2P_SALES.FACT_EVENTS (
+            CREATE TABLE SALES.FACT_EVENTS (
                 EVENT_ID NUMBER(12, 0) NOT NULL,
                 CUSTOMER_ID NUMBER(10, 0),
                 EVENT_DATE DATE,
@@ -208,7 +211,7 @@ def create_tables(conn: oracledb.Connection) -> None:
             )
             """,
             """
-            CREATE TABLE D2P_DOCS.DOCUMENTS (
+            CREATE TABLE DOCS.DOCUMENTS (
                 DOC_ID NUMBER(10, 0) NOT NULL,
                 CUSTOMER_ID NUMBER(10, 0),
                 DOC_NAME VARCHAR2(120),
@@ -241,7 +244,7 @@ def insert_customers(conn: oracledb.Connection, count: int) -> None:
     with conn.cursor() as cursor:
         cursor.executemany(
             """
-            INSERT INTO D2P_APP.CUSTOMERS(
+            INSERT INTO APP.CUSTOMERS(
                 CUSTOMER_ID, CUSTOMER_CODE, FULL_NAME, EMAIL, STATUS, CREDIT_LIMIT,
                 SIGNUP_DATE, UPDATED_AT, PROFILE
             ) VALUES (
@@ -269,7 +272,7 @@ def insert_customers(conn: oracledb.Connection, count: int) -> None:
                 setting_id += 1
         cursor.executemany(
             """
-            INSERT INTO D2P_APP.ACCOUNT_SETTINGS(
+            INSERT INTO APP.ACCOUNT_SETTINGS(
                 SETTING_ID, CUSTOMER_ID, SETTING_KEY, SETTING_VALUE, ENABLED_FLAG
             ) VALUES (:1, :2, :3, :4, :5)
             """,
@@ -329,7 +332,7 @@ def insert_sales(conn: oracledb.Connection, counts: SampleCounts) -> None:
     with conn.cursor() as cursor:
         cursor.executemany(
             """
-            INSERT INTO D2P_SALES.ORDERS(
+            INSERT INTO SALES.ORDERS(
                 ORDER_ID, CUSTOMER_ID, ORDER_DATE, ORDER_TS, CHANNEL, STATUS, ORDER_TOTAL, NOTES
             ) VALUES (
                 :1, :2,
@@ -342,7 +345,7 @@ def insert_sales(conn: oracledb.Connection, counts: SampleCounts) -> None:
         )
         cursor.executemany(
             """
-            INSERT INTO D2P_SALES.ORDER_ITEMS(
+            INSERT INTO SALES.ORDER_ITEMS(
                 ITEM_ID, ORDER_ID, SKU, QUANTITY, UNIT_PRICE, DISCOUNT_PCT
             ) VALUES (:1, :2, :3, :4, :5, :6)
             """,
@@ -350,7 +353,7 @@ def insert_sales(conn: oracledb.Connection, counts: SampleCounts) -> None:
         )
         cursor.executemany(
             """
-            INSERT INTO D2P_SALES.FACT_EVENTS(
+            INSERT INTO SALES.FACT_EVENTS(
                 EVENT_ID, CUSTOMER_ID, EVENT_DATE, EVENT_TYPE, SESSION_TOKEN, PAYLOAD
             ) VALUES (:1, :2, DATE '2024-01-01' + :3, :4, :5, :6)
             """,
@@ -377,7 +380,7 @@ def insert_documents(conn: oracledb.Connection, counts: SampleCounts) -> None:
     with conn.cursor() as cursor:
         cursor.executemany(
             """
-            INSERT INTO D2P_DOCS.DOCUMENTS(
+            INSERT INTO DOCS.DOCUMENTS(
                 DOC_ID, CUSTOMER_ID, DOC_NAME, DOC_TEXT, DOC_BYTES, CREATED_AT
             ) VALUES (:1, :2, :3, :4, :5, DATE '2024-06-01' + :6)
             """,
@@ -398,13 +401,13 @@ def write_config(output_dir: Path, oracle_image: str) -> None:
         "oracle": {"image": oracle_image, "max_stage_gb": 8},
         "default_hash_buckets": 8,
         "tables": {
-            "D2P_SALES.FACT_EVENTS": {
+            "SALES.FACT_EVENTS": {
                 "strategy": "hash",
                 "split_column": "CUSTOMER_ID",
                 "buckets": 8,
                 "force_large": True,
             },
-            "D2P_SALES.ORDER_ITEMS": {
+            "SALES.ORDER_ITEMS": {
                 "strategy": "hash",
                 "split_column": "ORDER_ID",
                 "buckets": 4,
@@ -423,9 +426,9 @@ Generated Oracle Data Pump file: `{dumpfile}`
 
 Schemas:
 
-- `D2P_APP`: customers and account settings.
-- `D2P_SALES`: partitioned orders, order items, and hash-chunk event facts.
-- `D2P_DOCS`: documents with CLOB and BLOB columns.
+- `APP`: customers and account settings.
+- `SALES`: partitioned orders, order items, and hash-chunk event facts.
+- `DOCS`: documents with CLOB and BLOB columns.
 
 Approximate row counts:
 
@@ -502,21 +505,26 @@ def create_sample_database(admin: OracleAdminConnection, counts: SampleCounts) -
 
 
 def print_summary(output_dir: Path, dumpfile: str, counts: SampleCounts) -> None:
-    print(f"Created {output_dir / dumpfile}")
-    print(f"Wrote {output_dir / 'config.yaml'}")
-    print(f"Wrote {output_dir / 'README.md'}")
-    print(
-        "Rows: "
-        f"customers={counts.customers}, "
-        f"orders={counts.orders}, "
-        f"order_items={counts.order_items}, "
-        f"events={counts.events}, "
-        f"documents={counts.documents}"
+    LOGGER.info("Created %s", output_dir / dumpfile)
+    LOGGER.info("Wrote %s", output_dir / "config.yaml")
+    LOGGER.info("Wrote %s", output_dir / "README.md")
+    LOGGER.info(
+        "Rows: customers=%d, orders=%d, order_items=%d, events=%d, documents=%d",
+        counts.customers,
+        counts.orders,
+        counts.order_items,
+        counts.events,
+        counts.documents,
     )
 
 
 def main() -> None:
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     output_dir = args.output_dir.resolve()
     counts = sample_counts(args.scale)
 
@@ -530,7 +538,7 @@ def main() -> None:
         password=args.oracle_password,
         mounts=((output_dir, CONTAINER_DUMP_PATH, "rw"),),
     ) as container:
-        print(f"Started Oracle container {container.name}; waiting for readiness...")
+        LOGGER.info("Started Oracle container %s; waiting for readiness...", container.name)
         container.wait_ready(timeout_seconds=120)
         admin = OracleAdminConnection(
             host="localhost",
@@ -539,9 +547,9 @@ def main() -> None:
             user="system",
             password=args.oracle_password,
         )
-        print("Creating sample schemas and data...")
+        LOGGER.info("Creating sample schemas and data...")
         create_sample_database(admin, counts)
-        print("Exporting full Data Pump dump...")
+        LOGGER.info("Exporting full Data Pump dump...")
         export_dump(container=container, admin=admin, output_dir=output_dir, dumpfile=args.dumpfile)
 
     write_config(output_dir, args.oracle_image)

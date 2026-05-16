@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from dmp_to_parquet.datapump.parfile import (
 )
 from dmp_to_parquet.docker_oracle import DockerOracle
 from dmp_to_parquet.errors import DataPumpError
+
+LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Error-code helpers

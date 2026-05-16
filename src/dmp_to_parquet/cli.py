@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from dmp_to_parquet.models import ConversionPlan
 from dmp_to_parquet.oracle.conn import create_directory, oracle_connection
 from dmp_to_parquet.planner import plan_tables
 
+LOGGER = logging.getLogger(__name__)
+
 console = Console()
 DEFAULT_DUMP_DIRECTORY = "DMP2PARQUET_DUMP"
 DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
@@ -25,6 +28,11 @@ DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
 @click.group()
 def main() -> None:
     """Convert Oracle Data Pump dumps to Parquet."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
 
 
 @main.command()
@@ -84,7 +92,6 @@ def _build_converter(
     admin: OracleAdminConnection,
     work_dir: Path,
     dumpfiles: tuple[str, ...],
-    stage_schema: str,
 ) -> OracleDumpConverter:
     return OracleDumpConverter(
         container=container,
@@ -93,7 +100,6 @@ def _build_converter(
         dumpfiles=dumpfiles,
         directory=DEFAULT_DUMP_DIRECTORY,
         directory_path=DEFAULT_CONTAINER_DUMP_PATH,
-        stage_schema=stage_schema,
     )
 
 
@@ -124,14 +130,12 @@ def _build_converter(
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
-@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
 def inspect(
     dump_paths: tuple[Path, ...],
     work_dir: Path,
     manifest_path: Path,
     oracle_image: str,
     oracle_password: str,
-    stage_schema: str,
 ) -> None:
     """Inspect a full Data Pump dump and write a manifest."""
 
@@ -150,13 +154,13 @@ def inspect(
             admin=admin,
             work_dir=work_dir,
             dumpfiles=dumpfiles,
-            stage_schema=stage_schema,
         )
         manifest = converter.inspect_dump()
         manifest = type(manifest)(
             dump_paths=tuple(str(path.resolve()) for path in dump_paths),
             tables=manifest.tables,
             version=manifest.version,
+            dump_format=manifest.dump_format,
         )
         save_manifest(manifest_path, manifest)
         console.print(f"[green]Wrote manifest with {len(manifest.tables)} tables[/green]")
@@ -177,12 +181,10 @@ def inspect(
     default=Path("work/plan.yaml"),
     show_default=True,
 )
-@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
 def plan_command(
     manifest_path: Path,
     config_path: Path | None,
     plan_path: Path,
-    stage_schema: str,
 ) -> None:
     """Build a conversion plan from an inspection manifest."""
 
@@ -194,7 +196,7 @@ def plan_command(
         tables=table_plans,
         oracle_image=config.oracle_image,
         max_stage_gb=config.max_stage_gb,
-        stage_schema=stage_schema,
+        dump_format=manifest.dump_format,
     )
     save_plan(plan_path, plan)
     unsupported = [table for table in table_plans if table.reason]
@@ -225,7 +227,6 @@ def plan_command(
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
-@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
 def convert(
     plan_path: Path | None,
     dump_paths: tuple[Path, ...],
@@ -234,7 +235,6 @@ def convert(
     work_dir: Path,
     oracle_image: str,
     oracle_password: str,
-    stage_schema: str,
 ) -> None:
     """Convert all tables in a plan, or inspect/plan/convert in one command."""
 
@@ -249,7 +249,6 @@ def convert(
 
     dump_dir, dumpfiles = _validate_dump_paths(resolved_dump_paths)
     image = plan.oracle_image if plan else oracle_image
-    active_stage_schema = plan.stage_schema if plan else stage_schema
 
     with DockerOracle.start(
         image=image,
@@ -265,7 +264,6 @@ def convert(
             admin=admin,
             work_dir=work_dir,
             dumpfiles=dumpfiles,
-            stage_schema=active_stage_schema,
         )
         if plan is None:
             config = load_config(config_path)
@@ -275,10 +273,11 @@ def convert(
                 tables=plan_tables(manifest.tables, config),
                 oracle_image=image,
                 max_stage_gb=config.max_stage_gb,
-                stage_schema=active_stage_schema,
+                dump_format=manifest.dump_format,
             )
             save_manifest(work_dir / "manifest.json", manifest)
             save_plan(work_dir / "plan.yaml", plan)
+        converter.dump_format = plan.dump_format
         state_store = StateStore(work_dir / "state.sqlite")
         try:
             result = converter.convert_plan(plan, output_dir, state_store)
@@ -314,7 +313,6 @@ def convert(
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
-@click.option("--stage-schema", default="DMP_STAGE", show_default=True)
 def convert_hash_table(
     dump_paths: tuple[Path, ...],
     source_schema: str,
@@ -325,7 +323,6 @@ def convert_hash_table(
     work_dir: Path,
     oracle_image: str,
     oracle_password: str,
-    stage_schema: str,
 ) -> None:
     """Convert one table from a dump using Data Pump QUERY hash buckets."""
 
@@ -363,7 +360,6 @@ def convert_hash_table(
             dumpfiles=dumpfiles,
             directory=DEFAULT_DUMP_DIRECTORY,
             directory_path=DEFAULT_CONTAINER_DUMP_PATH,
-            stage_schema=stage_schema,
         )
         result = converter.convert_hash_table(
             source_schema=source_schema,

@@ -140,7 +140,6 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
             work_dir=tmp_path / "work",
             dumpfiles=(dumpfile,),
             directory="DATA_PUMP_DIR",
-            stage_schema="DMP_STAGE",
         )
         manifest = converter.inspect_dump()
         assert {table.name for table in manifest.tables} == {
@@ -173,7 +172,6 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
             tables=table_plans,
             oracle_image=image,
             max_stage_gb=8,
-            stage_schema="DMP_STAGE",
         )
         state = StateStore(tmp_path / "work" / "state.sqlite")
         try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,10 @@ from dmp_to_parquet.oracle.exporter import export_table_to_parquet
 from dmp_to_parquet.oracle.identifiers import filesystem_safe_identifier
 from dmp_to_parquet.oracle.metadata import discover_table_metadata
 from dmp_to_parquet.planner import hash_bucket_query, null_bucket_query
+
+LOGGER = logging.getLogger(__name__)
+
+_STAGE_SCHEMA_PREFIX = "DMP_"
 
 
 @dataclass(frozen=True)
@@ -89,7 +94,6 @@ class OracleDumpConverter:
         dumpfiles: tuple[str, ...],
         directory: str = "DATA_PUMP_DIR",
         directory_path: str = "/opt/oracle/admin/FREE/dpdump",
-        stage_schema: str = "DMP_STAGE",
         stage_password: str = "StagePwd_123",
     ) -> None:
         self.container = container
@@ -98,12 +102,20 @@ class OracleDumpConverter:
         self.dumpfiles = dumpfiles
         self.directory = directory
         self.directory_path = directory_path.rstrip("/")
-        self.stage_schema = stage_schema
         self.stage_password = stage_password
         self.datapump = DataPumpRunner(container, work_dir / "parfiles")
         # Set during discover_dump_tables(); defaults to DATAPUMP until
         # detection runs.
         self.dump_format: DumpFormat = DumpFormat.DATAPUMP
+
+    @staticmethod
+    def _stage_schema_for(source_schema: str) -> str:
+        """Return the staging schema name for a given source schema.
+
+        The convention is ``DMP_<source_schema>``.  For example, a dump
+        containing schema ``APP`` is imported into ``DMP_APP``.
+        """
+        return f"{_STAGE_SCHEMA_PREFIX}{source_schema}"
 
     def _connect(self) -> AbstractContextManager[oracledb.Connection]:
         return oracle_connection(
@@ -125,18 +137,23 @@ class OracleDumpConverter:
         """Absolute paths to dump files inside the container."""
         return tuple(f"{self.directory_path}/{f}" for f in self.dumpfiles)
 
-    def prepare_stage_schema(self) -> None:
+    def prepare_stage_schema(self, source_schema: str) -> None:
+        stage_schema = self._stage_schema_for(source_schema)
+        LOGGER.debug("Ensuring staging schema %s for source %s", stage_schema, source_schema)
         with self._connect() as conn:
-            ensure_schema(conn, self.stage_schema, self.stage_password)
+            ensure_schema(conn, stage_schema, self.stage_password)
 
-    def drop_stage_schema(self) -> None:
+    def drop_stage_schema(self, source_schema: str) -> None:
+        stage_schema = self._stage_schema_for(source_schema)
+        LOGGER.debug("Dropping staging schema %s", stage_schema)
         with self._connect() as conn:
-            drop_schema(conn, self.stage_schema)
+            drop_schema(conn, stage_schema)
 
     def _metadata_import_table(self, source_schema: str, table: str) -> None:
-        self.prepare_stage_schema()
+        stage_schema = self._stage_schema_for(source_schema)
+        self.prepare_stage_schema(source_schema)
         with self._connect() as conn:
-            drop_table(conn, self.stage_schema, table)
+            drop_table(conn, stage_schema, table)
 
         if self.dump_format == DumpFormat.LEGACY:
             job = LegacyImportJob(
@@ -144,7 +161,7 @@ class OracleDumpConverter:
                 files=self._legacy_files(),
                 logfile=f"imp-meta-{source_schema}-{table}.log"[:120],
                 fromuser=source_schema,
-                touser=self.stage_schema,
+                touser=stage_schema,
                 tables=(table,),
                 rows=False,
                 indexes=False,
@@ -162,7 +179,7 @@ class OracleDumpConverter:
                 logfile=f"metadata-{source_schema}-{table}.log"[:120],
                 source_schema=source_schema,
                 table=table,
-                remap_schema=(source_schema, self.stage_schema),
+                remap_schema=(source_schema, stage_schema),
                 content="METADATA_ONLY",
                 exclude=("INDEX", "REF_CONSTRAINT", "TRIGGER"),
             )
@@ -252,12 +269,15 @@ class OracleDumpConverter:
         except LegacyDumpError:
             schema_tables = self._discover_legacy_dump_tables()
 
+        LOGGER.info("Discovered %d tables in dump", len(schema_tables))
         tables: list[TableMetadata] = []
         for source_schema, table in schema_tables:
+            stage_schema = self._stage_schema_for(source_schema)
+            LOGGER.debug("Inspecting %s.%s via staging schema %s", source_schema, table, stage_schema)
             self._metadata_import_table(source_schema, table)
             try:
                 with self._connect() as conn:
-                    metadata = discover_table_metadata(conn, self.stage_schema, table)
+                    metadata = discover_table_metadata(conn, stage_schema, table)
                 tables.append(
                     TableMetadata(
                         schema=source_schema,
@@ -271,7 +291,7 @@ class OracleDumpConverter:
                     )
                 )
             finally:
-                self.drop_stage_table(table)
+                self.drop_stage_table(source_schema, table)
         return DumpManifest(
             dump_paths=self.dumpfiles,
             tables=tuple(tables),
@@ -287,8 +307,9 @@ class OracleDumpConverter:
         query: str | None = None,
         partition_name: str | None = None,
     ) -> int:
+        stage_schema = self._stage_schema_for(source_schema)
         with self._connect() as conn:
-            drop_table(conn, self.stage_schema, table)
+            drop_table(conn, stage_schema, table)
 
         if self.dump_format == DumpFormat.LEGACY:
             # Legacy imp does not support QUERY= or partition-level imports.
@@ -299,7 +320,7 @@ class OracleDumpConverter:
                 files=self._legacy_files(),
                 logfile=f"imp-{source_schema}-{table}-{chunk_name}.log"[:120],
                 fromuser=source_schema,
-                touser=self.stage_schema,
+                touser=stage_schema,
                 tables=(table,),
                 rows=True,
                 indexes=False,
@@ -317,14 +338,14 @@ class OracleDumpConverter:
                 logfile=f"impdp-{source_schema}-{table}-{chunk_name}.log"[:120],
                 source_schema=source_schema,
                 table=table,
-                remap_schema=(source_schema, self.stage_schema),
+                remap_schema=(source_schema, stage_schema),
                 query=query,
                 partition_name=partition_name,
             )
             self.datapump.run_impdp(job)
 
         with self._connect() as conn:
-            return count_rows(conn, self.stage_schema, table)
+            return count_rows(conn, stage_schema, table)
 
     def export_stage_table(
         self,
@@ -334,6 +355,7 @@ class OracleDumpConverter:
         chunk_name: str,
         output_dir: Path,
     ) -> ChunkConversionResult:
+        stage_schema = self._stage_schema_for(source_schema)
         table_dir = (
             output_dir
             / filesystem_safe_identifier(source_schema)
@@ -341,11 +363,11 @@ class OracleDumpConverter:
         )
         parquet_path = table_dir / f"{filesystem_safe_identifier(chunk_name)}.parquet"
         with self._connect() as conn:
-            metadata = discover_table_metadata(conn, self.stage_schema, table)
-            imported_rows = count_rows(conn, self.stage_schema, table)
+            metadata = discover_table_metadata(conn, stage_schema, table)
+            imported_rows = count_rows(conn, stage_schema, table)
             export_result = export_table_to_parquet(
                 conn,
-                schema_name=self.stage_schema,
+                schema_name=stage_schema,
                 table_name=table,
                 columns=metadata.columns,
                 output_path=parquet_path,
@@ -357,9 +379,10 @@ class OracleDumpConverter:
             parquet_path=export_result.path,
         )
 
-    def drop_stage_table(self, table: str) -> None:
+    def drop_stage_table(self, source_schema: str, table: str) -> None:
+        stage_schema = self._stage_schema_for(source_schema)
         with self._connect() as conn:
-            drop_table(conn, self.stage_schema, table)
+            drop_table(conn, stage_schema, table)
 
     def convert_hash_table(
         self,
@@ -371,7 +394,7 @@ class OracleDumpConverter:
         output_dir: Path,
         include_null_bucket: bool = True,
     ) -> TableConversionResult:
-        self.prepare_stage_schema()
+        self.prepare_stage_schema(source_schema)
         chunks: list[ChunkConversionResult] = []
         for bucket_index in range(buckets):
             chunk_name = f"hash-{bucket_index:05d}-of-{buckets:05d}"
@@ -392,7 +415,7 @@ class OracleDumpConverter:
                     )
                 )
             finally:
-                self.drop_stage_table(table)
+                self.drop_stage_table(source_schema, table)
 
         if include_null_bucket:
             chunk_name = "hash-null"
@@ -412,7 +435,7 @@ class OracleDumpConverter:
                     )
                 )
             finally:
-                self.drop_stage_table(table)
+                self.drop_stage_table(source_schema, table)
 
         return TableConversionResult(source_schema=source_schema, table=table, chunks=tuple(chunks))
 
@@ -438,7 +461,7 @@ class OracleDumpConverter:
                 output_dir=output_dir,
             )
         finally:
-            self.drop_stage_table(table_plan.table)
+            self.drop_stage_table(table_plan.schema, table_plan.table)
 
     def convert_table_plan(
         self,
@@ -450,7 +473,7 @@ class OracleDumpConverter:
             reason = table_plan.reason or "unsupported table conversion strategy"
             raise ValueError(f"{table_plan.qualified_name}: {reason}")
 
-        self.prepare_stage_schema()
+        self.prepare_stage_schema(table_plan.schema)
         chunk_results: list[ChunkConversionResult] = []
         for chunk in table_plan.chunks:
             state = state_store.get(table_plan.qualified_name, chunk.name) if state_store else None
@@ -516,5 +539,11 @@ class OracleDumpConverter:
     ) -> PlanConversionResult:
         results: list[TableConversionResult] = []
         for table_plan in plan.tables:
+            LOGGER.info(
+                "Converting %s.%s (%s)",
+                table_plan.schema,
+                table_plan.table,
+                table_plan.strategy,
+            )
             results.append(self.convert_table_plan(table_plan, output_dir, state_store))
         return PlanConversionResult(tables=tuple(results))

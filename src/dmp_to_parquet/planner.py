@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from dmp_to_parquet.config import ConverterConfig, TableOverride, table_override
@@ -14,6 +15,8 @@ from dmp_to_parquet.models import (
     TableStrategy,
 )
 from dmp_to_parquet.oracle.identifiers import oracle_identifier
+
+LOGGER = logging.getLogger(__name__)
 
 
 def hash_bucket_query(split_column: str, bucket_index: int, bucket_count: int) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import time
@@ -24,6 +25,8 @@ from dmp_to_parquet.errors import (
     DockerPortError,
     DockerReadinessError,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 def docker_available() -> bool:

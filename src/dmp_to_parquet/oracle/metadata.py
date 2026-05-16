@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 import oracledb
 
 from dmp_to_parquet.models import ColumnMetadata, PartitionMetadata, TableMetadata
+
+LOGGER = logging.getLogger(__name__)
 
 ORACLE_MAINTAINED_SCHEMAS = frozenset(
     {

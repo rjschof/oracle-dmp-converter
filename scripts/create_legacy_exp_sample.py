@@ -3,8 +3,8 @@
 
 This script:
 1. Starts an Oracle Free container.
-2. Creates a source schema (LEGACYSRC) with two tables and test data.
-3. Exports the schema with ``exp`` (legacy format, NOT Data Pump).
+2. Creates two source schemas (APP and REPORTING) with tables and test data.
+3. Exports both schemas with ``exp`` (legacy format, NOT Data Pump).
 4. Saves the resulting .dmp and .log files to ``sample-data/legacy/``.
 
 The generated files are intentionally ignored by git (see .gitignore).
@@ -15,6 +15,7 @@ Run with:
 from __future__ import annotations
 
 import argparse
+import logging
 import subprocess
 import sys
 import uuid
@@ -29,32 +30,35 @@ from dmp_to_parquet.datapump.legacy_parfile import (
 from dmp_to_parquet.docker_oracle import DockerOracle
 from dmp_to_parquet.oracle.conn import drop_schema, oracle_connection
 
+LOGGER = logging.getLogger(__name__)
+
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "sample-data" / "legacy"
 DUMP_FILENAME = "legacy_exp_sample.dmp"
 LOG_FILENAME = "legacy_exp_sample.log"
-SCHEMA = "LEGACYSRC"
-PASSWORD = "OraclePwd_123"
-SCHEMA_PASSWORD = "LegacySrcPwd_123"
+APP_SCHEMA = "APP"
+REPORTING_SCHEMA = "REPORTING"
+ORACLE_PASSWORD = "OraclePwd_123"
+SCHEMA_PASSWORD = "LegacyPwd_123"
 
 
-def setup_schema(host: str, port: int, service: str) -> None:
-    print(f"  Creating schema {SCHEMA} …")
+def setup_app_schema(host: str, port: int, service: str) -> None:
+    LOGGER.info("Creating schema %s ...", APP_SCHEMA)
     with oracle_connection(
         host=host,
         port=port,
         service=service,
         user="system",
-        password=PASSWORD,
+        password=ORACLE_PASSWORD,
     ) as conn:
-        drop_schema(conn, SCHEMA)
+        drop_schema(conn, APP_SCHEMA)
         with conn.cursor() as cur:
-            cur.execute(f'CREATE USER {SCHEMA} IDENTIFIED BY "{SCHEMA_PASSWORD}"')
-            cur.execute(f"GRANT CONNECT, RESOURCE TO {SCHEMA}")
-            cur.execute(f"ALTER USER {SCHEMA} QUOTA UNLIMITED ON USERS")
+            cur.execute(f'CREATE USER {APP_SCHEMA} IDENTIFIED BY "{SCHEMA_PASSWORD}"')
+            cur.execute(f"GRANT CONNECT, RESOURCE TO {APP_SCHEMA}")
+            cur.execute(f"ALTER USER {APP_SCHEMA} QUOTA UNLIMITED ON USERS")
 
             cur.execute(
                 f"""
-                CREATE TABLE {SCHEMA}.PRODUCTS (
+                CREATE TABLE {APP_SCHEMA}.PRODUCTS (
                     PRODUCT_ID   NUMBER(10,0) NOT NULL,
                     PRODUCT_NAME VARCHAR2(100),
                     PRICE        NUMBER(10,2),
@@ -64,7 +68,7 @@ def setup_schema(host: str, port: int, service: str) -> None:
             )
             cur.execute(
                 f"""
-                CREATE TABLE {SCHEMA}.ORDERS (
+                CREATE TABLE {APP_SCHEMA}.ORDERS (
                     ORDER_ID    NUMBER(10,0) NOT NULL,
                     PRODUCT_ID  NUMBER(10,0),
                     QUANTITY    NUMBER(5,0),
@@ -75,16 +79,73 @@ def setup_schema(host: str, port: int, service: str) -> None:
             )
 
             products = [(i, f"Product {i}", round(9.99 + i * 1.5, 2)) for i in range(1, 21)]
-            cur.executemany(f"INSERT INTO {SCHEMA}.PRODUCTS VALUES (:1, :2, :3)", products)
+            cur.executemany(f"INSERT INTO {APP_SCHEMA}.PRODUCTS VALUES (:1, :2, :3)", products)
 
             orders = [(i, (i % 20) + 1, (i % 5) + 1) for i in range(1, 51)]
             cur.executemany(
-                f"INSERT INTO {SCHEMA}.ORDERS(ORDER_ID, PRODUCT_ID, QUANTITY) VALUES (:1, :2, :3)",
+                f"INSERT INTO {APP_SCHEMA}.ORDERS(ORDER_ID, PRODUCT_ID, QUANTITY)"
+                " VALUES (:1, :2, :3)",
                 orders,
             )
         conn.commit()
-    print(f"    {SCHEMA}.PRODUCTS  — 20 rows")
-    print(f"    {SCHEMA}.ORDERS    — 50 rows")
+    LOGGER.info("  %s.PRODUCTS  — 20 rows", APP_SCHEMA)
+    LOGGER.info("  %s.ORDERS    — 50 rows", APP_SCHEMA)
+
+
+def setup_reporting_schema(host: str, port: int, service: str) -> None:
+    LOGGER.info("Creating schema %s ...", REPORTING_SCHEMA)
+    with oracle_connection(
+        host=host,
+        port=port,
+        service=service,
+        user="system",
+        password=ORACLE_PASSWORD,
+    ) as conn:
+        drop_schema(conn, REPORTING_SCHEMA)
+        with conn.cursor() as cur:
+            cur.execute(
+                f'CREATE USER {REPORTING_SCHEMA} IDENTIFIED BY "{SCHEMA_PASSWORD}"'
+            )
+            cur.execute(f"GRANT CONNECT, RESOURCE TO {REPORTING_SCHEMA}")
+            cur.execute(f"ALTER USER {REPORTING_SCHEMA} QUOTA UNLIMITED ON USERS")
+
+            cur.execute(
+                f"""
+                CREATE TABLE {REPORTING_SCHEMA}.REPORTS (
+                    REPORT_ID    NUMBER(10,0) NOT NULL,
+                    REPORT_NAME  VARCHAR2(100),
+                    CREATED_DATE DATE DEFAULT SYSDATE,
+                    CONSTRAINT REPORTS_PK PRIMARY KEY (REPORT_ID)
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE {REPORTING_SCHEMA}.METRICS (
+                    METRIC_ID   NUMBER(10,0) NOT NULL,
+                    METRIC_NAME VARCHAR2(100),
+                    VALUE       NUMBER(12,4),
+                    CONSTRAINT METRICS_PK PRIMARY KEY (METRIC_ID)
+                )
+                """
+            )
+
+            reports = [(i, f"Report {i}") for i in range(1, 11)]
+            cur.executemany(
+                f"INSERT INTO {REPORTING_SCHEMA}.REPORTS(REPORT_ID, REPORT_NAME)"
+                " VALUES (:1, :2)",
+                reports,
+            )
+
+            metrics = [(i, f"Metric {i}", round(i * 3.14, 4)) for i in range(1, 16)]
+            cur.executemany(
+                f"INSERT INTO {REPORTING_SCHEMA}.METRICS(METRIC_ID, METRIC_NAME, VALUE)"
+                " VALUES (:1, :2, :3)",
+                metrics,
+            )
+        conn.commit()
+    LOGGER.info("  %s.REPORTS  — 10 rows", REPORTING_SCHEMA)
+    LOGGER.info("  %s.METRICS  — 15 rows", REPORTING_SCHEMA)
 
 
 def run_legacy_exp(
@@ -94,13 +155,13 @@ def run_legacy_exp(
     dump_container_path: str,
     log_container_path: str,
 ) -> None:
-    print("  Running legacy exp …")
-    conn = LegacyConnection(user="system", password=PASSWORD, service=service)
+    LOGGER.info("Running legacy exp ...")
+    conn = LegacyConnection(user="system", password=ORACLE_PASSWORD, service=service)
     job = LegacyExportJob(
         connection=conn,
         files=(dump_container_path,),
         logfile=log_container_path,
-        owner=(SCHEMA,),
+        owner=(APP_SCHEMA, REPORTING_SCHEMA),
         rows=True,
         indexes=False,
         grants=False,
@@ -115,9 +176,9 @@ def run_legacy_exp(
 
     result = container.exec(["exp", f"parfile={remote_par}"], check=False)
     output = result.stdout + result.stderr
-    print(output)
+    LOGGER.info(output)
     if result.returncode != 0:
-        print("ERROR: exp failed — see output above", file=sys.stderr)
+        LOGGER.error("exp failed — see output above")
         sys.exit(1)
 
 
@@ -130,9 +191,9 @@ def copy_out(container: DockerOracle, remote_path: str, local_path: Path) -> Non
         check=False,
     )
     if result.returncode != 0:
-        print(f"ERROR copying {remote_path}: {result.stderr}", file=sys.stderr)
+        LOGGER.error("ERROR copying %s: %s", remote_path, result.stderr)
         sys.exit(1)
-    print(f"    Saved → {local_path}")
+    LOGGER.info("Saved -> %s", local_path)
 
 
 def main() -> None:
@@ -149,12 +210,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
     dump_out = OUTPUT_DIR / DUMP_FILENAME
     log_out = OUTPUT_DIR / LOG_FILENAME
 
     if dump_out.exists() and not args.force:
-        print(f"Sample dump already exists: {dump_out}")
-        print("Pass --force to regenerate.")
+        LOGGER.info("Sample dump already exists: %s", dump_out)
+        LOGGER.info("Pass --force to regenerate.")
         return
 
     work_dir = OUTPUT_DIR / ".work"
@@ -165,22 +232,23 @@ def main() -> None:
     log_container = f"{container_dumps}/{LOG_FILENAME}"
 
     image = args.oracle_image
-    print(f"Starting Oracle container ({image}) …")
+    LOGGER.info("Starting Oracle container (%s) ...", image)
 
     with DockerOracle.start(
         image=image,
-        password=PASSWORD,
+        password=ORACLE_PASSWORD,
         mounts=((OUTPUT_DIR, container_dumps, "rw"),),
     ) as container:
-        print(f"  Container: {container.name}")
-        print("  Waiting for Oracle to be ready (may take a few minutes) …")
+        LOGGER.info("Container: %s", container.name)
+        LOGGER.info("Waiting for Oracle to be ready (may take a few minutes) ...")
         container.wait_ready(timeout_seconds=600)
-        print("  Oracle is ready.")
+        LOGGER.info("Oracle is ready.")
 
         port = container.mapped_port()
         service = container.service
 
-        setup_schema("localhost", port, service)
+        setup_app_schema("localhost", port, service)
+        setup_reporting_schema("localhost", port, service)
         run_legacy_exp(container, work_dir, service, dump_container, log_container)
 
         # Files are written into the mounted OUTPUT_DIR on the host.
@@ -189,15 +257,14 @@ def main() -> None:
             copy_out(container, dump_container, dump_out)
             copy_out(container, log_container, log_out)
 
-    print()
     if dump_out.exists():
         size_kb = dump_out.stat().st_size // 1024
-        print("Legacy exp dump created successfully:")
-        print(f"  {dump_out}  ({size_kb} KB)")
+        LOGGER.info("Legacy exp dump created successfully:")
+        LOGGER.info("  %s  (%d KB)", dump_out, size_kb)
         if log_out.exists():
-            print(f"  {log_out}")
+            LOGGER.info("  %s", log_out)
     else:
-        print("ERROR: dump file not found after container exit.", file=sys.stderr)
+        LOGGER.error("dump file not found after container exit.")
         sys.exit(1)
 
 

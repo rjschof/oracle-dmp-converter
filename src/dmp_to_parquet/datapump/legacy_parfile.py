@@ -20,7 +20,10 @@ different parameter format.  Key differences from Data Pump parfiles:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

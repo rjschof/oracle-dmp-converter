@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from dmp_to_parquet.config import ColumnOverride
 from dmp_to_parquet.models import ColumnMetadata
 from dmp_to_parquet.oracle.identifiers import oracle_identifier
+
+LOGGER = logging.getLogger(__name__)
 
 STRING_TYPES = {"CHAR", "NCHAR", "VARCHAR2", "NVARCHAR2", "CLOB", "NCLOB", "LONG"}
 BINARY_TYPES = {"RAW", "LONG RAW", "BLOB"}

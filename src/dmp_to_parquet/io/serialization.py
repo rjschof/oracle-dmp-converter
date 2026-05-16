@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import json
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from dmp_to_parquet.models import (
     TablePlan,
     TableStrategy,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 def column_to_dict(column: ColumnMetadata) -> dict[str, Any]:
@@ -155,10 +158,10 @@ def save_plan(path: Path, plan: ConversionPlan) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": plan.version,
+        "dump_format": plan.dump_format.value,
         "dump_paths": list(plan.dump_paths),
         "oracle_image": plan.oracle_image,
         "max_stage_gb": plan.max_stage_gb,
-        "stage_schema": plan.stage_schema,
         "tables": [table_plan_to_dict(table_plan) for table_plan in plan.tables],
     }
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
@@ -166,11 +169,12 @@ def save_plan(path: Path, plan: ConversionPlan) -> None:
 
 def load_plan(path: Path) -> ConversionPlan:
     data = yaml.safe_load(path.read_text()) or {}
+    raw_format = data.get("dump_format", DumpFormat.DATAPUMP.value)
     return ConversionPlan(
         version=int(data.get("version", 1)),
+        dump_format=DumpFormat(raw_format),
         dump_paths=tuple(data.get("dump_paths", [])),
         oracle_image=str(data["oracle_image"]),
         max_stage_gb=int(data["max_stage_gb"]),
-        stage_schema=str(data.get("stage_schema", "DMP_STAGE")),
         tables=tuple(table_plan_from_dict(plan) for plan in data.get("tables", [])),
     )

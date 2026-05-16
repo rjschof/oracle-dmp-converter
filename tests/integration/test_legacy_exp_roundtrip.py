@@ -201,7 +201,6 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
             dumpfiles=(dump_filename,),
             directory="DMP2PARQUET_DUMP",
             directory_path="/dumps",
-            stage_schema="DMP_STAGE",
         )
         manifest = converter.inspect_dump()
 
@@ -228,7 +227,6 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
             tables=table_plans,
             oracle_image=image,
             max_stage_gb=8,
-            stage_schema="DMP_STAGE",
         )
         state = StateStore(work_dir / "state.sqlite")
         try:
@@ -268,8 +266,10 @@ _SAMPLE_DUMP_DIR = Path(__file__).resolve().parent.parent.parent / "sample-data"
 _SAMPLE_DUMP_FILE = _SAMPLE_DUMP_DIR / "legacy_exp_sample.dmp"
 
 # Schema and row counts that scripts/create_legacy_exp_sample.py creates.
-_SAMPLE_SCHEMA = "LEGACYSRC"
-_SAMPLE_EXPECTED = {"PRODUCTS": 20, "ORDERS": 50}
+_SAMPLE_EXPECTED = {
+    "APP": {"PRODUCTS": 20, "ORDERS": 50},
+    "REPORTING": {"REPORTS": 10, "METRICS": 15},
+}
 
 
 def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
@@ -332,17 +332,17 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
             dumpfiles=(dump_filename,),
             directory="DMP2PARQUET_DUMP",
             directory_path="/dumps",
-            stage_schema="DMP_STAGE",
         )
 
         manifest = converter.inspect_dump()
 
         assert manifest.dump_format == DumpFormat.LEGACY
         table_names = {t.name for t in manifest.tables}
-        for expected_table in _SAMPLE_EXPECTED:
-            assert expected_table in table_names, (
-                f"{expected_table} not found in manifest; got {table_names}"
-            )
+        for schema_tables in _SAMPLE_EXPECTED.values():
+            for expected_table in schema_tables:
+                assert expected_table in table_names, (
+                    f"{expected_table} not found in manifest; got {table_names}"
+                )
 
         table_plans = plan_tables(
             manifest.tables,
@@ -359,7 +359,6 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
             tables=table_plans,
             oracle_image=image,
             max_stage_gb=8,
-            stage_schema="DMP_STAGE",
         )
         state = StateStore(work_dir / "state.sqlite")
         try:
@@ -367,11 +366,17 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
         finally:
             state.close()
 
-    assert result.rows == sum(_SAMPLE_EXPECTED.values())
-    for table_name, expected_rows in _SAMPLE_EXPECTED.items():
-        parquet_files = sorted((parquet_dir / _SAMPLE_SCHEMA / table_name).glob("*.parquet"))
-        assert len(parquet_files) == 1
-        assert count_parquet_rows(parquet_files) == expected_rows
+    total_expected = sum(
+        rows for schema_tables in _SAMPLE_EXPECTED.values() for rows in schema_tables.values()
+    )
+    assert result.rows == total_expected
+    for schema_name, schema_tables in _SAMPLE_EXPECTED.items():
+        for table_name, expected_rows in schema_tables.items():
+            parquet_files = sorted((parquet_dir / schema_name / table_name).glob("*.parquet"))
+            assert len(parquet_files) == 1, (
+                f"Expected 1 parquet file for {schema_name}.{table_name}, got {len(parquet_files)}"
+            )
+            assert count_parquet_rows(parquet_files) == expected_rows
     assert all(
         chunk.imported_rows == chunk.parquet_rows
         for table_result in result.tables

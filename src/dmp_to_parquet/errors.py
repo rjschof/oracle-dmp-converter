@@ -1,5 +1,9 @@
 """Project-specific exceptions."""
 
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
 
 class DmpToParquetError(Exception):
     """Base exception for converter failures."""
