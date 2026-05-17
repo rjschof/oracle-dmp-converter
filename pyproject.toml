@@ -4,6 +4,7 @@ version = "0.2.1"
 description = "Convert Oracle Data Pump dumps to Parquet, Avro, or CSV through Oracle Free staging."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "click>=8.1.8",
     "docker>=7.1.0",
