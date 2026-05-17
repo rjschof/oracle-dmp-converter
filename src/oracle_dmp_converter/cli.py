@@ -9,7 +9,7 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, load_config
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, load_config
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
 from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
 from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
@@ -93,6 +93,7 @@ def _build_converter(
     work_dir: Path,
     dumpfiles: tuple[str, ...],
     output_format: OutputFormat = OutputFormat.PARQUET,
+    config: ConverterConfig = ConverterConfig(),
 ) -> OracleDumpConverter:
     return OracleDumpConverter(
         container=container,
@@ -102,6 +103,7 @@ def _build_converter(
         directory=DEFAULT_DUMP_DIRECTORY,
         directory_path=DEFAULT_CONTAINER_DUMP_PATH,
         output_format=output_format,
+        config=config,
     )
 
 
@@ -250,12 +252,12 @@ def convert(
     """Convert all tables in a plan, or inspect/plan/convert in one command."""
 
     fmt = OutputFormat(output_format.lower())
+    config = load_config(config_path)
 
     if plan_path:
         plan = load_plan(plan_path)
         resolved_dump_paths = _dump_paths_or_plan_dump_paths(dump_paths, plan.dump_paths)
     else:
-        config = load_config(config_path)
         resolved_dump_paths = _dump_paths_or_plan_dump_paths(dump_paths)
         plan = None
         oracle_image = config.oracle_image if oracle_image == DEFAULT_ORACLE_IMAGE else oracle_image
@@ -278,9 +280,9 @@ def convert(
             work_dir=work_dir,
             dumpfiles=dumpfiles,
             output_format=fmt,
+            config=config,
         )
         if plan is None:
-            config = load_config(config_path)
             manifest = converter.inspect_dump()
             plan = ConversionPlan(
                 dump_paths=tuple(str(path) for path in resolved_dump_paths),

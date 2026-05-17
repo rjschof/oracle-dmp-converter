@@ -19,7 +19,6 @@ class TableOverride:
     strategy: str | None = None
     split_column: str | None = None
     buckets: int | None = None
-    chunk_interval: str | None = None
     force_large: bool = False
 
 

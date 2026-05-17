@@ -14,7 +14,6 @@ class TableStrategy(StrEnum):
     WHOLE_TABLE = "whole_table"
     PARTITION = "partition"
     HASH = "hash"
-    RANGE = "range"
     UNSUPPORTED = "unsupported"
 
 

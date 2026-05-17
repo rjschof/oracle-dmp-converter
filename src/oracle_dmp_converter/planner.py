@@ -91,16 +91,6 @@ def plan_table(
             chunks=(ChunkPlan(name="whole", strategy=TableStrategy.WHOLE_TABLE),),
         )
 
-    if override and override.strategy == "range":
-        return TablePlan(
-            schema=table.schema,
-            table=table.name,
-            strategy=TableStrategy.UNSUPPORTED,
-            reason=(
-                "range planning requires explicit range boundaries; only hash chunking is automated"
-            ),
-        )
-
     # Legacy exp dumps cannot be hash-chunked (no QUERY= support in imp) and
     # do not support reliable partition-level imports.  Restrict to
     # WHOLE_TABLE; tables that exceed the staging limit are UNSUPPORTED.

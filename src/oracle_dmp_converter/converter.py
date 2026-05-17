@@ -9,6 +9,7 @@ from pathlib import Path
 
 import oracledb
 
+from oracle_dmp_converter.config import ConverterConfig, column_override
 from oracle_dmp_converter.datapump.imp_show import parse_imp_indexfile_tables
 from oracle_dmp_converter.datapump.legacy_parfile import (
     LegacyConnection,
@@ -97,6 +98,7 @@ class OracleDumpConverter:
         directory_path: str = "/opt/oracle/admin/FREE/dpdump",
         stage_password: str = "StagePwd_123",
         output_format: OutputFormat = OutputFormat.PARQUET,
+        config: ConverterConfig = ConverterConfig(),
     ) -> None:
         self.container = container
         self.admin = admin
@@ -106,6 +108,7 @@ class OracleDumpConverter:
         self.directory_path = directory_path.rstrip("/")
         self.stage_password = stage_password
         self.output_format = output_format
+        self.config = config
         self._inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")
         self._convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")
         # Set during discover_dump_tables(); defaults to DATAPUMP until
@@ -372,6 +375,11 @@ class OracleDumpConverter:
         with self._connect() as conn:
             metadata = discover_table_metadata(conn, stage_schema, table)
             imported_rows = count_rows(conn, stage_schema, table)
+            col_overrides = {
+                col.name: ov
+                for col in metadata.columns
+                if (ov := column_override(self.config, source_schema, table, col.name))
+            }
             export_result = export_table(
                 conn,
                 schema_name=stage_schema,
@@ -379,6 +387,7 @@ class OracleDumpConverter:
                 columns=metadata.columns,
                 output_path=output_path,
                 output_format=self.output_format,
+                column_overrides=col_overrides or None,
             )
         return ChunkConversionResult(
             name=chunk_name,
