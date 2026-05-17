@@ -1,0 +1,122 @@
+# config.yaml.example
+#
+# Full annotated reference for oracle-dmp-converter configuration.
+# Pass this file to any command that accepts --config:
+#
+#   oracle-dmp-converter plan  --config ./config.yaml ...
+#   oracle-dmp-converter convert --config ./config.yaml ...
+#
+# All config keys are optional. If --config is omitted the converter
+# runs with the defaults shown here.
+#
+# Key lookup for `tables` and `columns` is case-insensitive:
+# the converter tries the key exactly as written, then falls back to
+# the uppercased form. Use whatever casing matches your dump.
+
+# ---------------------------------------------------------------------------
+# oracle — Docker / staging database settings
+# ---------------------------------------------------------------------------
+oracle:
+  # Docker image used as the temporary Oracle Free staging database.
+  # Default: gvenzl/oracle-free:23-faststart
+  # Override at the CLI level with --oracle-image or the env var
+  # ORACLE_DMP_CONVERTER_IMAGE.
+  image: gvenzl/oracle-free:23-faststart
+
+  # Maximum size in GiB that a single staged table is allowed to occupy
+  # before the converter treats it as "large" and requires either a
+  # hash-chunk strategy or force_large: true to proceed.
+  # Default: 8
+  max_stage_gb: 8
+
+# ---------------------------------------------------------------------------
+# default_hash_buckets — global hash-bucket count
+# ---------------------------------------------------------------------------
+# Number of ORA_HASH buckets used when a table is planned with the hash
+# strategy and no per-table `buckets` override is set.
+# Default: 64
+#
+# This key is also accepted nested under `oracle:` for backwards
+# compatibility (oracle.default_hash_buckets). The top-level value takes
+# precedence if both are present.
+default_hash_buckets: 64
+
+# ---------------------------------------------------------------------------
+# tables — per-table strategy overrides
+# ---------------------------------------------------------------------------
+# Keys are SCHEMA.TABLE (case-insensitive). Each entry can override any
+# combination of the four fields below; omitted fields inherit the global
+# defaults determined by the planner.
+#
+# strategy:      hash | whole
+#                  hash  — import one ORA_HASH bucket at a time via Data Pump
+#                          QUERY= parameter. Requires a suitable split_column.
+#                  whole — import the entire table in one shot.
+#                Note: "range" is not implemented; the planner immediately
+#                marks such tables UNSUPPORTED.
+#
+# split_column:  Name of the scalar column used as the ORA_HASH argument.
+#                Must be a non-LOB, non-ROWID type. If omitted the planner
+#                selects a column automatically (PK > unique key > non-null
+#                scalar > nullable scalar).
+#
+# buckets:       Number of hash buckets for this table. Overrides
+#                default_hash_buckets for this table only.
+#
+# force_large:   Set true to bypass the max_stage_gb size check and allow
+#                the full table to be staged regardless of its estimated size.
+#                Use with caution — Oracle Free has a fixed 12 GiB data limit.
+
+tables:
+  # Example: large fact table split into 256 hash buckets
+  SALES.ORDER_ITEMS:
+    strategy: hash
+    split_column: ORDER_ID
+    buckets: 256
+
+  # Example: partitioned table that the planner would hash by default,
+  # forced to whole-table import instead
+  SALES.ORDERS:
+    strategy: whole
+
+  # Example: table that exceeds max_stage_gb but must be imported whole
+  ARCHIVE.AUDIT_LOG:
+    strategy: whole
+    force_large: true
+
+  # Example: hash strategy with auto-selected split column (planner picks
+  # the best candidate from PK / unique key / non-null scalar / nullable scalar)
+  APP.EVENTS:
+    strategy: hash
+    buckets: 128
+
+# ---------------------------------------------------------------------------
+# columns — per-column expression and type overrides
+# ---------------------------------------------------------------------------
+# Keys are SCHEMA.TABLE.COLUMN (case-insensitive).
+#
+# expression:   SQL expression applied to the column during SELECT.
+#               Use {column} as a placeholder for the column name.
+#               Useful for converting Oracle spatial or LOB types to a
+#               portable string representation before Arrow coercion.
+#
+# parquet_type: Arrow/Parquet type to use when writing the column.
+#               Supported values: string, int32, int64, float32, float64,
+#               bool, binary, date32, timestamp[us].
+#               Use this when the default Oracle-to-Arrow type mapping
+#               produces an unsuitable type (e.g. SDO_GEOMETRY → string).
+
+columns:
+  # Example: Oracle Spatial geometry converted to Well-Known Text
+  GIS.ROADS.GEOM:
+    expression: "SDO_UTIL.TO_WKTGEOMETRY({column})"
+    parquet_type: string
+
+  # Example: CLOB column cast to VARCHAR2 to avoid streaming as binary
+  DOCS.ARTICLES.BODY:
+    expression: "DBMS_LOB.SUBSTR({column}, 32767, 1)"
+    parquet_type: string
+
+  # Example: force a NUMBER(1) flag column to boolean in the output
+  APP.USERS.IS_ACTIVE:
+    parquet_type: bool
