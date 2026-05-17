@@ -191,7 +191,7 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
     assert count_parquet_rows(small_files) == 3
     assert _read_ids(big_files) == set(range(1, 33))
     assert all(
-        chunk.imported_rows == chunk.parquet_rows
+        chunk.imported_rows == chunk.output_rows
         for table_result in result.tables
         for chunk in table_result.chunks
     )

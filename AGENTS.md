@@ -57,7 +57,7 @@ Types that are **never** hash candidates: `BFILE`, `BLOB`, `CLOB`, `LONG`, `LONG
 Preference order: (1) single-col primary key, (2) single-col unique key, (3) non-nullable scalar, (4) nullable scalar.
 
 ## Output Structure
-Output files land at `<output_dir>/<schema>/<table>/<chunk>.<ext>` where names are lowercased and non-alphanumeric chars replaced with `_`.
+Output files land at `<output_dir>/<schema>/<table>/<chunk>.<ext>` where names are case-preserved and run through `urllib.parse.quote(name, safe="")` (hyphens, underscores, periods, and tildes are kept as-is; other special characters are percent-encoded).
 - Whole-table chunk: `whole.parquet` / `whole.avro` / `whole.csv`
 - Hash chunks: `hash-00000-of-00064.parquet` (zero-padded 5 digits) + `hash-null.parquet` for null bucket
 - Partition chunks: `partition-00001-<PARTITION_NAME>.parquet`

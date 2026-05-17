@@ -245,9 +245,9 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
     assert count_parquet_rows(dept_files) == 3
     assert result.rows == 13
 
-    # Verify all chunks match imported vs parquet counts.
+    # Verify all chunks match imported vs output counts.
     assert all(
-        chunk.imported_rows == chunk.parquet_rows
+        chunk.imported_rows == chunk.output_rows
         for table_result in result.tables
         for chunk in table_result.chunks
     )
@@ -378,7 +378,7 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
             )
             assert count_parquet_rows(parquet_files) == expected_rows
     assert all(
-        chunk.imported_rows == chunk.parquet_rows
+        chunk.imported_rows == chunk.output_rows
         for table_result in result.tables
         for chunk in table_result.chunks
     )

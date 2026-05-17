@@ -12,6 +12,7 @@ from rich.console import Console
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, load_config
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
 from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.errors import LegacyDumpError
 from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
 from oracle_dmp_converter.io.state import StateStore
 from oracle_dmp_converter.models import ConversionPlan, OutputFormat
@@ -337,6 +338,16 @@ def convert(
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
+@click.option(
+    "--null-bucket/--no-null-bucket",
+    "include_null_bucket",
+    default=True,
+    show_default=True,
+    help=(
+        "Include an extra import pass for NULL values in the split column. "
+        "Safe to disable with --no-null-bucket when the split column is NOT NULL."
+    ),
+)
 def convert_hash_table(
     dump_paths: tuple[Path, ...],
     source_schema: str,
@@ -348,6 +359,7 @@ def convert_hash_table(
     work_dir: Path,
     oracle_image: str,
     oracle_password: str,
+    include_null_bucket: bool,
 ) -> None:
     """Convert one table from a dump using Data Pump QUERY hash buckets."""
 
@@ -388,13 +400,17 @@ def convert_hash_table(
             directory_path=DEFAULT_CONTAINER_DUMP_PATH,
             output_format=fmt,
         )
-        result = converter.convert_hash_table(
-            source_schema=source_schema,
-            table=table_name,
-            split_column=split_column,
-            buckets=buckets,
-            output_dir=output_dir,
-        )
+        try:
+            result = converter.convert_hash_table(
+                source_schema=source_schema,
+                table=table_name,
+                split_column=split_column,
+                buckets=buckets,
+                output_dir=output_dir,
+                include_null_bucket=include_null_bucket,
+            )
+        except LegacyDumpError as exc:
+            raise click.ClickException(str(exc)) from exc
         console.print(
             f"[green]Converted {result.rows} rows from {source_schema}.{table_name}[/green]"
         )

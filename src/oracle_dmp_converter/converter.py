@@ -213,16 +213,21 @@ class OracleDumpConverter:
 
         return parse_imp_indexfile_tables(sql_text)
 
-    def discover_dump_tables(self) -> tuple[tuple[str, str], ...]:
-        """Discover tables in the dump, auto-detecting exp vs expdp format.
+    def _probe_dump_format(self) -> None:
+        """Detect whether the dump is Data Pump (expdp) or legacy (exp) format.
 
-        Tries ``impdp SQLFILE=`` first.  If the output contains
-        ``ORA-39142`` (incompatible dump-file version) or ``ORA-39143``
-        ("The file may be an original export dump file" — emitted by 23ai
-        Free), the dump was produced by legacy ``exp``; we set
-        :attr:`dump_format` to
-        :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and fall back to
-        ``imp INDEXFILE=``.  Any other ``impdp`` failure is re-raised as-is.
+        Runs ``impdp SQLFILE=`` against the dump.  On success the dump is a
+        Data Pump file and :attr:`dump_format` is set to
+        :attr:`~oracle_dmp_converter.models.DumpFormat.DATAPUMP`.
+
+        If ``impdp`` fails with ``ORA-39142`` or ``ORA-39143`` the dump was
+        produced by legacy ``exp``; :attr:`dump_format` is set to
+        :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and
+        :class:`~oracle_dmp_converter.errors.LegacyDumpError` is raised so the
+        caller can switch to the ``imp``-based workflow.
+
+        Any other ``impdp`` failure is re-raised as
+        :class:`~oracle_dmp_converter.errors.DataPumpError`.
         """
         sqlfile = "dmp2parquet-discovery.sql"
         job = SqlFileJob(
@@ -237,12 +242,28 @@ class OracleDumpConverter:
         except DataPumpError as exc:
             if not is_legacy_format_error(str(exc)):
                 raise
-            # Legacy exp dump — switch to imp-based workflow.
             self.dump_format = DumpFormat.LEGACY
             raise LegacyDumpError(str(exc)) from exc
+        self.dump_format = DumpFormat.DATAPUMP
+
+    def discover_dump_tables(self) -> tuple[tuple[str, str], ...]:
+        """Discover tables in the dump, auto-detecting exp vs expdp format.
+
+        Tries ``impdp SQLFILE=`` first.  If the output contains
+        ``ORA-39142`` (incompatible dump-file version) or ``ORA-39143``
+        ("The file may be an original export dump file" — emitted by 23ai
+        Free), the dump was produced by legacy ``exp``; we set
+        :attr:`dump_format` to
+        :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and fall back to
+        ``imp INDEXFILE=``.  Any other ``impdp`` failure is re-raised as-is.
+        """
+        try:
+            self._probe_dump_format()
+        except LegacyDumpError:
+            return self._discover_legacy_dump_tables()
 
         # Data Pump succeeded — read the SQLFILE output.
-        self.dump_format = DumpFormat.DATAPUMP
+        sqlfile = "dmp2parquet-discovery.sql"
         result = self.container.exec(["cat", f"{self.directory_path}/{sqlfile}"], check=False)
         sql_text = result.stdout if result.returncode == 0 else ""
         if not sql_text:
@@ -270,11 +291,7 @@ class OracleDumpConverter:
         to :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and ``imp``
         is used for all subsequent operations.
         """
-        # First pass: try Data Pump path; on LegacyDumpError switch to imp.
-        try:
-            schema_tables = self.discover_dump_tables()
-        except LegacyDumpError:
-            schema_tables = self._discover_legacy_dump_tables()
+        schema_tables = self.discover_dump_tables()
 
         LOGGER.info("Discovered %d tables in dump", len(schema_tables))
         tables: list[TableMetadata] = []
@@ -411,6 +428,18 @@ class OracleDumpConverter:
         output_dir: Path,
         include_null_bucket: bool = True,
     ) -> TableConversionResult:
+        # Detect the dump format before entering the hash loop.  Legacy exp
+        # dumps cannot be hash-chunked because imp has no QUERY= support.
+        try:
+            self._probe_dump_format()
+        except LegacyDumpError as exc:
+            msg = (
+                f"{source_schema}.{table}: hash chunking requires a Data Pump (expdp) dump; "
+                "this dump was created with legacy exp which does not support QUERY= filtering. "
+                "Re-export the data with expdp to use convert-hash-table."
+            )
+            raise LegacyDumpError(msg) from exc
+
         self.prepare_stage_schema(source_schema)
         chunks: list[ChunkConversionResult] = []
         for bucket_index in range(buckets):

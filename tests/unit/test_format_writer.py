@@ -5,7 +5,9 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import fastavro
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from oracle_dmp_converter.oracle.format_writer import (
@@ -49,8 +51,6 @@ class TestParquetFormatWriter:
         writer.write_batch(table)
         writer.close()
 
-        import pyarrow.parquet as pq
-
         result = pq.read_table(path)
         assert result.num_rows == 2
         assert result.schema.names == ["id", "name", "amount"]
@@ -63,8 +63,6 @@ class TestParquetFormatWriter:
             writer.write_batch(_make_table(schema, [(i, f"row{i}", float(i))]))
         writer.close()
 
-        import pyarrow.parquet as pq
-
         assert pq.read_table(path).num_rows == 3
 
     def test_write_empty(self, tmp_path: Path) -> None:
@@ -73,8 +71,6 @@ class TestParquetFormatWriter:
         writer = ParquetFormatWriter(path, schema)
         writer.write_empty(schema)
         writer.close()
-
-        import pyarrow.parquet as pq
 
         result = pq.read_table(path)
         assert result.num_rows == 0
@@ -88,8 +84,6 @@ class TestParquetFormatWriter:
 
 class TestAvroFormatWriter:
     def test_write_single_batch(self, tmp_path: Path) -> None:
-        import fastavro
-
         schema = _simple_schema()
         path = tmp_path / "out.avro"
         writer = AvroFormatWriter(path, schema)
@@ -103,8 +97,6 @@ class TestAvroFormatWriter:
         assert records[1]["name"] == "Bob"
 
     def test_write_empty(self, tmp_path: Path) -> None:
-        import fastavro
-
         schema = _simple_schema()
         path = tmp_path / "out.avro"
         writer = AvroFormatWriter(path, schema)
@@ -113,11 +105,9 @@ class TestAvroFormatWriter:
 
         with open(path, "rb") as fh:
             records = list(fastavro.reader(fh))
-        assert records == []
+        assert not records
 
     def test_decimal_field(self, tmp_path: Path) -> None:
-        import fastavro
-
         schema = pa.schema([pa.field("price", pa.decimal128(10, 2))])
         path = tmp_path / "dec.avro"
         values = [Decimal("12.34"), Decimal("99.99")]

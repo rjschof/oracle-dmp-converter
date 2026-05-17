@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterable
 
 from oracle_dmp_converter.config import ConverterConfig, TableOverride, table_override
+from oracle_dmp_converter.errors import PlanningError
 from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
@@ -29,12 +30,52 @@ def null_bucket_query(split_column: str) -> str:
     return f"{oracle_identifier(split_column)} IS NULL"
 
 
+def _assert_hash_candidate(table: TableMetadata, col: ColumnMetadata) -> None:
+    """Raise PlanningError if *col* cannot be used with ORA_HASH.
+
+    Called when the user has explicitly named a split column in the config
+    override so that an invalid choice is rejected at plan time rather than
+    failing inside Oracle at runtime.
+    """
+    if not col.is_hash_candidate:
+        raise PlanningError(
+            f"{table.schema}.{table.name}: split_column {col.name!r} "
+            f"is type {col.normalized_type}, which is not eligible for ORA_HASH "
+            "(BFILE, BLOB, CLOB, LONG, LONG RAW, NCLOB, RAW, ROWID, UROWID, and "
+            "XMLTYPE columns cannot be used as hash split columns)"
+        )
+
+
+def _scan_columns_for_split(
+    columns: tuple[ColumnMetadata, ...],
+    preferred_types: tuple[str, ...],
+) -> ColumnMetadata | None:
+    """Return the best available non-key split column, or None.
+
+    Preference order: non-nullable preferred type → any preferred type →
+    any hash-candidate type.
+    """
+    for col in columns:
+        if col.is_hash_candidate and col.normalized_type in preferred_types and not col.nullable:
+            return col
+    for col in columns:
+        if col.is_hash_candidate and col.normalized_type in preferred_types:
+            return col
+    for col in columns:
+        if col.is_hash_candidate:
+            return col
+    return None
+
+
 def choose_split_column(
     table: TableMetadata,
     override: TableOverride | None = None,
 ) -> ColumnMetadata | None:
     if override and override.split_column:
-        return table.column(override.split_column)
+        col = table.column(override.split_column)
+        if col is not None:
+            _assert_hash_candidate(table, col)
+        return col
 
     if len(table.primary_key) == 1:
         column = table.column(table.primary_key[0])
@@ -60,20 +101,7 @@ def choose_split_column(
         "NVARCHAR2",
         "NCHAR",
     )
-    for column in table.columns:
-        if (
-            column.is_hash_candidate
-            and column.normalized_type in preferred_types
-            and not column.nullable
-        ):
-            return column
-    for column in table.columns:
-        if column.is_hash_candidate and column.normalized_type in preferred_types:
-            return column
-    for column in table.columns:
-        if column.is_hash_candidate:
-            return column
-    return None
+    return _scan_columns_for_split(table.columns, preferred_types)
 
 
 def plan_table(

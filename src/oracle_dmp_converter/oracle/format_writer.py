@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 from abc import ABC, abstractmethod
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import fastavro
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
@@ -132,8 +135,6 @@ def _arrow_schema_to_avro(schema: pa.Schema, record_name: str = "Row") -> dict[s
 
 def _table_to_records(table: pa.Table, schema: pa.Schema) -> list[dict[str, Any]]:
     """Convert a PyArrow table to a list of row dicts suitable for fastavro."""
-    from decimal import Decimal
-
     records: list[dict[str, Any]] = []
     column_names = [field.name for field in schema]
     pydict = table.to_pydict()
@@ -147,8 +148,6 @@ def _table_to_records(table: pa.Table, schema: pa.Schema) -> list[dict[str, Any]
                 row[col_name] = None
             elif pa.types.is_timestamp(arrow_type):
                 # fastavro expects integer microseconds since epoch for timestamp-micros
-                import datetime
-
                 if isinstance(value, datetime.datetime):
                     epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
                     aware = value.replace(tzinfo=datetime.UTC) if value.tzinfo is None else value
@@ -173,29 +172,26 @@ class AvroFormatWriter(FormatWriter):
     """
 
     def __init__(self, path: Path, schema: pa.Schema) -> None:
-        import fastavro  # local import keeps it optional at module level
-
         self._path = path
         self._arrow_schema = schema
         self._avro_schema = fastavro.parse_schema(
             _arrow_schema_to_avro(schema, record_name=path.stem.replace("-", "_"))
         )
-        self._fastavro = fastavro
         self._has_data = False
 
     def write_batch(self, table: pa.Table) -> None:
         records = _table_to_records(table, self._arrow_schema)
         if not self._has_data:
             with open(self._path, "wb") as fh:
-                self._fastavro.writer(fh, self._avro_schema, records)
+                fastavro.writer(fh, self._avro_schema, records)
             self._has_data = True
         else:
             with open(self._path, "a+b") as fh:
-                self._fastavro.writer(fh, self._avro_schema, records)
+                fastavro.writer(fh, self._avro_schema, records)
 
     def write_empty(self, schema: pa.Schema) -> None:
         with open(self._path, "wb") as fh:
-            self._fastavro.writer(fh, self._avro_schema, [])
+            fastavro.writer(fh, self._avro_schema, [])
 
     def close(self) -> None:
         pass  # Each batch opens and closes its own file handle.
@@ -221,7 +217,7 @@ class CsvFormatWriter(FormatWriter):
 
     def _ensure_open(self) -> Any:
         if self._file is None:
-            self._file = open(self._path, "wb")  # noqa: WPS515 – deliberately kept open
+            self._file = open(self._path, "wb")  # pylint: disable=consider-using-with
         return self._file
 
     def write_batch(self, table: pa.Table) -> None:

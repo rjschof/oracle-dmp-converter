@@ -1,4 +1,7 @@
+import pytest
+
 from oracle_dmp_converter.config import ConverterConfig, TableOverride
+from oracle_dmp_converter.errors import PlanningError
 from oracle_dmp_converter.models import (
     ColumnMetadata,
     PartitionMetadata,
@@ -85,3 +88,31 @@ def test_override_split_column_and_buckets() -> None:
     )
     assert len(plan.chunks) == 8
     assert plan.split_column == "TENANT_ID"
+
+
+def test_override_split_column_non_hash_candidate_raises_planning_error() -> None:
+    """A config override naming a LOB/non-scalar split column must fail at plan
+    time with a clear PlanningError rather than silently passing and failing
+    at runtime inside Oracle."""
+    table = TableMetadata(
+        schema="SALES",
+        name="DOCUMENTS",
+        columns=(
+            ColumnMetadata("ID", "NUMBER", 1, nullable=False),
+            ColumnMetadata("BODY", "CLOB", 2, nullable=True),
+        ),
+        estimated_bytes=100 * 1024**3,
+    )
+    with pytest.raises(PlanningError, match="CLOB"):
+        plan_table(
+            table,
+            ConverterConfig(
+                max_stage_gb=8,
+                tables={
+                    "SALES.DOCUMENTS": TableOverride(
+                        strategy="hash",
+                        split_column="BODY",
+                    )
+                },
+            ),
+        )

@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
+import fastavro
 import pyarrow.parquet as pq
 
 from oracle_dmp_converter.models import OutputFormat
@@ -25,8 +26,6 @@ def count_output_rows(paths: Iterable[Path], output_format: OutputFormat) -> int
         for path in paths:
             total += pq.ParquetFile(path).metadata.num_rows  # type: ignore[no-untyped-call]
     elif output_format == OutputFormat.AVRO:
-        import fastavro
-
         for path in paths:
             with open(path, "rb") as fh:
                 reader = fastavro.reader(fh)
