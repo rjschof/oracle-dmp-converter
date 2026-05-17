@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pyarrow as pa
 
-from dmp_to_parquet.oracle.exporter import _coerce_value
+from oracle_dmp_converter.oracle.exporter import _coerce_value
 
 
 def test_decimal_coercion_rescales_to_arrow_scale() -> None:

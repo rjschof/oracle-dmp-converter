@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from dmp_to_parquet.oracle.identifiers import oracle_identifier
+from oracle_dmp_converter.oracle.identifiers import oracle_identifier
 
 LOGGER = logging.getLogger(__name__)
 

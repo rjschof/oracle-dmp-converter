@@ -21,14 +21,14 @@ import sys
 import uuid
 from pathlib import Path
 
-from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE
-from dmp_to_parquet.datapump.legacy_parfile import (
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
+from oracle_dmp_converter.datapump.legacy_parfile import (
     LegacyConnection,
     LegacyExportJob,
     render_legacy_export_parfile,
 )
-from dmp_to_parquet.docker_oracle import DockerOracle
-from dmp_to_parquet.oracle.conn import drop_schema, oracle_connection
+from oracle_dmp_converter.docker_oracle import DockerOracle
+from oracle_dmp_converter.oracle.conn import drop_schema, oracle_connection
 
 LOGGER = logging.getLogger(__name__)
 

@@ -6,13 +6,13 @@ import logging
 import uuid
 from pathlib import Path
 
-from dmp_to_parquet.datapump.legacy_parfile import (
+from oracle_dmp_converter.datapump.legacy_parfile import (
     LegacyImportJob,
     LegacyIndexFileJob,
     render_legacy_import_parfile,
     render_legacy_indexfile_parfile,
 )
-from dmp_to_parquet.datapump.parfile import (
+from oracle_dmp_converter.datapump.parfile import (
     ExportJob,
     ImportJob,
     SqlFileJob,
@@ -20,8 +20,8 @@ from dmp_to_parquet.datapump.parfile import (
     render_import_parfile,
     render_sqlfile_parfile,
 )
-from dmp_to_parquet.docker_oracle import DockerOracle
-from dmp_to_parquet.errors import DataPumpError
+from oracle_dmp_converter.docker_oracle import DockerOracle
+from oracle_dmp_converter.errors import DataPumpError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class DataPumpRunner:
     def run_imp(self, job: LegacyImportJob) -> str:
         """Run a legacy ``imp`` import job inside the container.
 
-        Raises :class:`~dmp_to_parquet.errors.DataPumpError` on non-zero
+        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
         exit, preserving the full combined stdout+stderr as the message.
         """
         remote_path = self._write_and_copy(render_legacy_import_parfile(job), "imp")
@@ -105,7 +105,7 @@ class DataPumpRunner:
         Returns an empty string if the file cannot be read (e.g. the dump
         is empty or contains no table objects).
 
-        Raises :class:`~dmp_to_parquet.errors.DataPumpError` on non-zero
+        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
         exit from ``imp``.
         """
         remote_path = self._write_and_copy(render_legacy_indexfile_parfile(job), "imp-indexfile")

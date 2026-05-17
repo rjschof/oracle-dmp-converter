@@ -16,7 +16,7 @@ class ChunkState:
     chunk_name: str
     status: str
     imported_rows: int | None = None
-    parquet_rows: int | None = None
+    output_rows: int | None = None
     error: str | None = None
 
 
@@ -25,6 +25,7 @@ class StateStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
+        self._migrate()
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chunks (
@@ -32,7 +33,7 @@ class StateStore:
                 chunk_name TEXT NOT NULL,
                 status TEXT NOT NULL,
                 imported_rows INTEGER,
-                parquet_rows INTEGER,
+                output_rows INTEGER,
                 error TEXT,
                 PRIMARY KEY (table_name, chunk_name)
             )
@@ -40,18 +41,34 @@ class StateStore:
         )
         self.conn.commit()
 
+    def _migrate(self) -> None:
+        """Rename legacy ``parquet_rows`` column to ``output_rows`` if present."""
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
+        )
+        if cursor.fetchone() is None:
+            return  # table doesn't exist yet; nothing to migrate
+        col_names = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        if "parquet_rows" in col_names and "output_rows" not in col_names:
+            LOGGER.info("Migrating state.sqlite: renaming parquet_rows → output_rows")
+            self.conn.execute("ALTER TABLE chunks RENAME COLUMN parquet_rows TO output_rows")
+            self.conn.commit()
+
     def close(self) -> None:
         self.conn.close()
 
     def upsert(self, state: ChunkState) -> None:
         self.conn.execute(
             """
-            INSERT INTO chunks(table_name, chunk_name, status, imported_rows, parquet_rows, error)
+            INSERT INTO chunks(table_name, chunk_name, status, imported_rows, output_rows, error)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(table_name, chunk_name) DO UPDATE SET
                 status = excluded.status,
                 imported_rows = excluded.imported_rows,
-                parquet_rows = excluded.parquet_rows,
+                output_rows = excluded.output_rows,
                 error = excluded.error
             """,
             (
@@ -59,7 +76,7 @@ class StateStore:
                 state.chunk_name,
                 state.status,
                 state.imported_rows,
-                state.parquet_rows,
+                state.output_rows,
                 state.error,
             ),
         )
@@ -68,7 +85,7 @@ class StateStore:
     def get(self, table_name: str, chunk_name: str) -> ChunkState | None:
         row = self.conn.execute(
             """
-            SELECT table_name, chunk_name, status, imported_rows, parquet_rows, error
+            SELECT table_name, chunk_name, status, imported_rows, output_rows, error
             FROM chunks
             WHERE table_name = ? AND chunk_name = ?
             """,

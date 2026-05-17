@@ -1,4 +1,4 @@
-from dmp_to_parquet.datapump.sqlfile import parse_sqlfile_tables
+from oracle_dmp_converter.datapump.sqlfile import parse_sqlfile_tables
 
 
 def test_parse_sqlfile_tables_extracts_user_tables() -> None:

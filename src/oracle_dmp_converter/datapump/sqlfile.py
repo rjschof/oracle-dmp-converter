@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
-from dmp_to_parquet.oracle.metadata import ORACLE_MAINTAINED_SCHEMAS
+from oracle_dmp_converter.oracle.metadata import ORACLE_MAINTAINED_SCHEMAS
 
 LOGGER = logging.getLogger(__name__)
 

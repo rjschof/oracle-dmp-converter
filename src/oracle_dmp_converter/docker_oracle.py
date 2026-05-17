@@ -16,8 +16,8 @@ import docker
 import oracledb
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
-from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE
-from dmp_to_parquet.errors import (
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
+from oracle_dmp_converter.errors import (
     DockerContainerError,
     DockerError,
     DockerExecError,
@@ -97,7 +97,7 @@ class DockerOracle:
     image: str = DEFAULT_ORACLE_IMAGE
     password: str = "OraclePwd_123"
     service: str = "FREEPDB1"
-    name: str = field(default_factory=lambda: f"dmp2parquet-{uuid.uuid4().hex[:12]}")
+    name: str = field(default_factory=lambda: f"oracle-dmp-converter-{uuid.uuid4().hex[:12]}")
     platform: str | None = None
     mounts: tuple[tuple[Path, str, str], ...] = ()
     started: bool = False
@@ -119,8 +119,8 @@ class DockerOracle:
             image=image or DEFAULT_ORACLE_IMAGE,
             password=password,
             service=service,
-            name=name or f"dmp2parquet-{uuid.uuid4().hex[:12]}",
-            platform=platform or os.environ.get("DMP_TO_PARQUET_DOCKER_PLATFORM"),
+            name=name or f"oracle-dmp-converter-{uuid.uuid4().hex[:12]}",
+            platform=platform or os.environ.get("ORACLE_DMP_CONVERTER_DOCKER_PLATFORM"),
             mounts=mounts,
         )
         container._start_container()

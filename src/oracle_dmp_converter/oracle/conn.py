@@ -8,7 +8,7 @@ from contextlib import contextmanager
 
 import oracledb
 
-from dmp_to_parquet.oracle.identifiers import oracle_identifier, oracle_qualified_name
+from oracle_dmp_converter.oracle.identifiers import oracle_identifier, oracle_qualified_name
 
 LOGGER = logging.getLogger(__name__)
 

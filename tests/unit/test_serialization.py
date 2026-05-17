@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from dmp_to_parquet.io.serialization import load_manifest, load_plan, save_manifest, save_plan
-from dmp_to_parquet.models import (
+from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
+from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
     ConversionPlan,

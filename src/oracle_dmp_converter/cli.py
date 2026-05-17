@@ -9,25 +9,25 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE, load_config
-from dmp_to_parquet.converter import OracleAdminConnection, OracleDumpConverter
-from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
-from dmp_to_parquet.io.serialization import load_manifest, load_plan, save_manifest, save_plan
-from dmp_to_parquet.io.state import StateStore
-from dmp_to_parquet.models import ConversionPlan
-from dmp_to_parquet.oracle.conn import create_directory, oracle_connection
-from dmp_to_parquet.planner import plan_tables
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, load_config
+from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
+from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
+from oracle_dmp_converter.io.state import StateStore
+from oracle_dmp_converter.models import ConversionPlan, OutputFormat
+from oracle_dmp_converter.oracle.conn import create_directory, oracle_connection
+from oracle_dmp_converter.planner import plan_tables
 
 LOGGER = logging.getLogger(__name__)
 
 console = Console()
-DEFAULT_DUMP_DIRECTORY = "DMP2PARQUET_DUMP"
+DEFAULT_DUMP_DIRECTORY = "ORACLE_DMC_DUMP"
 DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
 
 
 @click.group()
 def main() -> None:
-    """Convert Oracle Data Pump dumps to Parquet."""
+    """Convert Oracle Data Pump dumps to Parquet, Avro, or CSV."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -92,6 +92,7 @@ def _build_converter(
     admin: OracleAdminConnection,
     work_dir: Path,
     dumpfiles: tuple[str, ...],
+    output_format: OutputFormat = OutputFormat.PARQUET,
 ) -> OracleDumpConverter:
     return OracleDumpConverter(
         container=container,
@@ -100,6 +101,7 @@ def _build_converter(
         dumpfiles=dumpfiles,
         directory=DEFAULT_DUMP_DIRECTORY,
         directory_path=DEFAULT_CONTAINER_DUMP_PATH,
+        output_format=output_format,
     )
 
 
@@ -126,7 +128,7 @@ def _build_converter(
 )
 @click.option(
     "--oracle-image",
-    default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
+    default=lambda: os.environ.get("ORACLE_DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE),
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
@@ -216,6 +218,14 @@ def plan_command(
 @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
 @click.option("--output", "output_dir", type=click.Path(path_type=Path), required=True)
 @click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["parquet", "avro", "csv"], case_sensitive=False),
+    default="parquet",
+    show_default=True,
+    help="Output file format.",
+)
+@click.option(
     "--work-dir",
     type=click.Path(path_type=Path),
     default=Path("work"),
@@ -223,7 +233,7 @@ def plan_command(
 )
 @click.option(
     "--oracle-image",
-    default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
+    default=lambda: os.environ.get("ORACLE_DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE),
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
@@ -232,11 +242,14 @@ def convert(
     dump_paths: tuple[Path, ...],
     config_path: Path | None,
     output_dir: Path,
+    output_format: str,
     work_dir: Path,
     oracle_image: str,
     oracle_password: str,
 ) -> None:
     """Convert all tables in a plan, or inspect/plan/convert in one command."""
+
+    fmt = OutputFormat(output_format.lower())
 
     if plan_path:
         plan = load_plan(plan_path)
@@ -264,6 +277,7 @@ def convert(
             admin=admin,
             work_dir=work_dir,
             dumpfiles=dumpfiles,
+            output_format=fmt,
         )
         if plan is None:
             config = load_config(config_path)
@@ -302,6 +316,14 @@ def convert(
 @click.option("--buckets", default=64, show_default=True, type=int)
 @click.option("--output", "output_dir", type=click.Path(path_type=Path), required=True)
 @click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["parquet", "avro", "csv"], case_sensitive=False),
+    default="parquet",
+    show_default=True,
+    help="Output file format.",
+)
+@click.option(
     "--work-dir",
     type=click.Path(path_type=Path),
     default=Path("work"),
@@ -309,7 +331,7 @@ def convert(
 )
 @click.option(
     "--oracle-image",
-    default=lambda: os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE),
+    default=lambda: os.environ.get("ORACLE_DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE),
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
@@ -320,6 +342,7 @@ def convert_hash_table(
     split_column: str,
     buckets: int,
     output_dir: Path,
+    output_format: str,
     work_dir: Path,
     oracle_image: str,
     oracle_password: str,
@@ -328,6 +351,7 @@ def convert_hash_table(
 
     if buckets < 1:
         raise click.ClickException("--buckets must be at least 1")
+    fmt = OutputFormat(output_format.lower())
     dump_dir, dumpfiles = _validate_dump_paths(dump_paths)
 
     with DockerOracle.start(
@@ -360,6 +384,7 @@ def convert_hash_table(
             dumpfiles=dumpfiles,
             directory=DEFAULT_DUMP_DIRECTORY,
             directory_path=DEFAULT_CONTAINER_DUMP_PATH,
+            output_format=fmt,
         )
         result = converter.convert_hash_table(
             source_schema=source_schema,

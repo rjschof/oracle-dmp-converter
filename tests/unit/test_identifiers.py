@@ -1,4 +1,4 @@
-from dmp_to_parquet.oracle.identifiers import (
+from oracle_dmp_converter.oracle.identifiers import (
     filesystem_safe_identifier,
     oracle_identifier,
     oracle_qualified_name,

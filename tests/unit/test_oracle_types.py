@@ -1,5 +1,5 @@
-from dmp_to_parquet.models import ColumnMetadata
-from dmp_to_parquet.oracle.types import export_expression, parquet_type_name
+from oracle_dmp_converter.models import ColumnMetadata
+from oracle_dmp_converter.oracle.types import export_expression, parquet_type_name
 
 
 def col(data_type: str, precision: int | None = None, scale: int | None = None) -> ColumnMetadata:

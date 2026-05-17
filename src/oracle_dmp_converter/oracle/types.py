@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from dmp_to_parquet.config import ColumnOverride
-from dmp_to_parquet.models import ColumnMetadata
-from dmp_to_parquet.oracle.identifiers import oracle_identifier
+from oracle_dmp_converter.config import ColumnOverride
+from oracle_dmp_converter.models import ColumnMetadata
+from oracle_dmp_converter.oracle.identifiers import oracle_identifier
 
 LOGGER = logging.getLogger(__name__)
 

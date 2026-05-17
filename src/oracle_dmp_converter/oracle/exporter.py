@@ -1,4 +1,4 @@
-"""Streaming Oracle-to-Parquet export."""
+"""Streaming Oracle table export to pluggable output formats."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from typing import Any
 
 import oracledb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
-from dmp_to_parquet.config import ColumnOverride
-from dmp_to_parquet.models import ColumnMetadata
-from dmp_to_parquet.oracle.identifiers import oracle_identifier, oracle_qualified_name
-from dmp_to_parquet.oracle.types import export_expression, parquet_type_name
+from oracle_dmp_converter.config import ColumnOverride
+from oracle_dmp_converter.models import ColumnMetadata, OutputFormat
+from oracle_dmp_converter.oracle.format_writer import FormatWriter, make_writer
+from oracle_dmp_converter.oracle.identifiers import oracle_identifier, oracle_qualified_name
+from oracle_dmp_converter.oracle.types import export_expression, parquet_type_name
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,16 +105,22 @@ def _rows_to_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Table:
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
-def export_table_to_parquet(
+def export_table(
     conn: oracledb.Connection,
     *,
     schema_name: str,
     table_name: str,
     columns: tuple[ColumnMetadata, ...],
     output_path: Path,
+    output_format: OutputFormat = OutputFormat.PARQUET,
     column_overrides: dict[str, ColumnOverride] | None = None,
     batch_size: int = 10_000,
 ) -> ExportResult:
+    """Export *table_name* from *conn* to *output_path* in *output_format*.
+
+    Rows are streamed in batches of *batch_size* to keep memory bounded.
+    An empty output file is always produced even when the table has no rows.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     column_overrides = column_overrides or {}
     arrow_schema = arrow_schema_for_columns(columns, column_overrides)
@@ -126,7 +132,8 @@ def export_table_to_parquet(
     sql = f"SELECT {select_list} FROM {oracle_qualified_name(schema_name, table_name)}"
 
     total_rows = 0
-    writer: pq.ParquetWriter | None = None
+    writer: FormatWriter = make_writer(output_format, output_path, arrow_schema)
+    has_rows = False
     try:
         with conn.cursor() as cursor:
             cursor.arraysize = batch_size
@@ -136,20 +143,39 @@ def export_table_to_parquet(
                 if not rows:
                     break
                 table = _rows_to_table(rows, arrow_schema)
-                if writer is None:
-                    writer = pq.ParquetWriter(  # type: ignore[no-untyped-call]
-                        output_path,
-                        arrow_schema,
-                    )
-                writer.write_table(table)  # type: ignore[no-untyped-call]
+                writer.write_batch(table)
+                has_rows = True
                 total_rows += len(rows)
-        if writer is None:
-            empty_arrays = [pa.array([], type=field.type) for field in arrow_schema]
-            pq.write_table(  # type: ignore[no-untyped-call]
-                pa.Table.from_arrays(empty_arrays, schema=arrow_schema),
-                output_path,
-            )
+        if not has_rows:
+            writer.write_empty(arrow_schema)
     finally:
-        if writer is not None:
-            writer.close()  # type: ignore[no-untyped-call]
+        writer.close()
     return ExportResult(path=output_path, rows=total_rows)
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatibility shim
+# ---------------------------------------------------------------------------
+
+
+def export_table_to_parquet(
+    conn: oracledb.Connection,
+    *,
+    schema_name: str,
+    table_name: str,
+    columns: tuple[ColumnMetadata, ...],
+    output_path: Path,
+    column_overrides: dict[str, ColumnOverride] | None = None,
+    batch_size: int = 10_000,
+) -> ExportResult:
+    """Export to Parquet.  Prefer :func:`export_table` for new call sites."""
+    return export_table(
+        conn,
+        schema_name=schema_name,
+        table_name=table_name,
+        columns=columns,
+        output_path=output_path,
+        output_format=OutputFormat.PARQUET,
+        column_overrides=column_overrides,
+        batch_size=batch_size,
+    )

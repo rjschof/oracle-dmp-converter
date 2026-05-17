@@ -1,12 +1,13 @@
 [project]
-name = "dmp-to-parquet"
+name = "oracle-dmp-converter"
 version = "0.1.0"
-description = "Convert Oracle Data Pump dumps to Parquet through Oracle Free staging."
+description = "Convert Oracle Data Pump dumps to Parquet, Avro, or CSV through Oracle Free staging."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1.8",
     "docker>=7.1.0",
+    "fastavro>=1.9.0",
     "oracledb>=2.5.1",
     "pyarrow>=18.1.0",
     "pyyaml>=6.0.2",
@@ -14,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dmp-to-parquet = "dmp_to_parquet.cli:main"
+oracle-dmp-converter = "oracle_dmp_converter.cli:main"
 
 [dependency-groups]
 dev = [

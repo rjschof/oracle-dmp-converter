@@ -1,4 +1,4 @@
-from dmp_to_parquet.datapump.parfile import (
+from oracle_dmp_converter.datapump.parfile import (
     DataPumpConnection,
     ExportJob,
     ImportJob,

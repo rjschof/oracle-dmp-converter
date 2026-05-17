@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dmp_to_parquet.datapump.legacy_parfile import (
+from oracle_dmp_converter.datapump.legacy_parfile import (
     LegacyConnection,
     LegacyExportJob,
     LegacyImportJob,

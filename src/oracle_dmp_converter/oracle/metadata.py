@@ -6,7 +6,7 @@ import logging
 
 import oracledb
 
-from dmp_to_parquet.models import ColumnMetadata, PartitionMetadata, TableMetadata
+from oracle_dmp_converter.models import ColumnMetadata, PartitionMetadata, TableMetadata
 
 LOGGER = logging.getLogger(__name__)
 

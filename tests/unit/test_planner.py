@@ -1,6 +1,11 @@
-from dmp_to_parquet.config import ConverterConfig, TableOverride
-from dmp_to_parquet.models import ColumnMetadata, PartitionMetadata, TableMetadata, TableStrategy
-from dmp_to_parquet.planner import hash_bucket_query, plan_table
+from oracle_dmp_converter.config import ConverterConfig, TableOverride
+from oracle_dmp_converter.models import (
+    ColumnMetadata,
+    PartitionMetadata,
+    TableMetadata,
+    TableStrategy,
+)
+from oracle_dmp_converter.planner import hash_bucket_query, plan_table
 
 
 def test_hash_bucket_query_uses_ora_hash_max_bucket() -> None:

@@ -23,6 +23,12 @@ class DumpFormat(StrEnum):
     LEGACY = "legacy"
 
 
+class OutputFormat(StrEnum):
+    PARQUET = "parquet"
+    AVRO = "avro"
+    CSV = "csv"
+
+
 @dataclass(frozen=True)
 class ColumnMetadata:
     name: str

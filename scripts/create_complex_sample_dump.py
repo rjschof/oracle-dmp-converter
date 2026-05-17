@@ -19,12 +19,12 @@ from pathlib import Path
 import oracledb
 import yaml
 
-from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE
-from dmp_to_parquet.converter import OracleAdminConnection
-from dmp_to_parquet.datapump.parfile import DataPumpConnection, ExportJob
-from dmp_to_parquet.datapump.runner import DataPumpRunner
-from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
-from dmp_to_parquet.oracle.conn import (
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
+from oracle_dmp_converter.converter import OracleAdminConnection
+from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ExportJob
+from oracle_dmp_converter.datapump.runner import DataPumpRunner
+from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.oracle.conn import (
     create_directory,
     drop_schema,
     ensure_schema,

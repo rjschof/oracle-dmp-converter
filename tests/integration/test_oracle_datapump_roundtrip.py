@@ -6,16 +6,16 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from dmp_to_parquet.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, TableOverride
-from dmp_to_parquet.converter import OracleAdminConnection, OracleDumpConverter
-from dmp_to_parquet.datapump.parfile import DataPumpConnection, ExportJob
-from dmp_to_parquet.datapump.runner import DataPumpRunner
-from dmp_to_parquet.docker_oracle import DockerOracle, docker_available
-from dmp_to_parquet.io.state import StateStore
-from dmp_to_parquet.io.validation import count_parquet_rows
-from dmp_to_parquet.models import ConversionPlan, TableStrategy
-from dmp_to_parquet.oracle.conn import drop_schema, oracle_connection, table_exists
-from dmp_to_parquet.planner import plan_tables
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, TableOverride
+from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
+from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ExportJob
+from oracle_dmp_converter.datapump.runner import DataPumpRunner
+from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.io.state import StateStore
+from oracle_dmp_converter.io.validation import count_parquet_rows
+from oracle_dmp_converter.models import ConversionPlan, TableStrategy
+from oracle_dmp_converter.oracle.conn import drop_schema, oracle_connection, table_exists
+from oracle_dmp_converter.planner import plan_tables
 
 pytestmark = pytest.mark.integration
 

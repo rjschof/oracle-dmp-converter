@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
-from dmp_to_parquet.config import ConverterConfig, TableOverride, table_override
-from dmp_to_parquet.models import (
+from oracle_dmp_converter.config import ConverterConfig, TableOverride, table_override
+from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
     DumpFormat,
@@ -14,7 +14,7 @@ from dmp_to_parquet.models import (
     TablePlan,
     TableStrategy,
 )
-from dmp_to_parquet.oracle.identifiers import oracle_identifier
+from oracle_dmp_converter.oracle.identifiers import oracle_identifier
 
 LOGGER = logging.getLogger(__name__)
 

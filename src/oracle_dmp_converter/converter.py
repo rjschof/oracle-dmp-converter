@@ -9,38 +9,39 @@ from pathlib import Path
 
 import oracledb
 
-from dmp_to_parquet.datapump.imp_show import parse_imp_indexfile_tables
-from dmp_to_parquet.datapump.legacy_parfile import (
+from oracle_dmp_converter.datapump.imp_show import parse_imp_indexfile_tables
+from oracle_dmp_converter.datapump.legacy_parfile import (
     LegacyConnection,
     LegacyImportJob,
     LegacyIndexFileJob,
 )
-from dmp_to_parquet.datapump.parfile import DataPumpConnection, ImportJob, SqlFileJob
-from dmp_to_parquet.datapump.runner import DataPumpRunner, is_legacy_format_error
-from dmp_to_parquet.datapump.sqlfile import parse_sqlfile_tables
-from dmp_to_parquet.docker_oracle import DockerOracle
-from dmp_to_parquet.errors import DataPumpError, LegacyDumpError
-from dmp_to_parquet.io.state import ChunkState, StateStore
-from dmp_to_parquet.models import (
+from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ImportJob, SqlFileJob
+from oracle_dmp_converter.datapump.runner import DataPumpRunner, is_legacy_format_error
+from oracle_dmp_converter.datapump.sqlfile import parse_sqlfile_tables
+from oracle_dmp_converter.docker_oracle import DockerOracle
+from oracle_dmp_converter.errors import DataPumpError, LegacyDumpError
+from oracle_dmp_converter.io.state import ChunkState, StateStore
+from oracle_dmp_converter.models import (
     ChunkPlan,
     ConversionPlan,
     DumpFormat,
     DumpManifest,
+    OutputFormat,
     TableMetadata,
     TablePlan,
     TableStrategy,
 )
-from dmp_to_parquet.oracle.conn import (
+from oracle_dmp_converter.oracle.conn import (
     count_rows,
     drop_schema,
     drop_table,
     ensure_schema,
     oracle_connection,
 )
-from dmp_to_parquet.oracle.exporter import export_table_to_parquet
-from dmp_to_parquet.oracle.identifiers import filesystem_safe_identifier
-from dmp_to_parquet.oracle.metadata import discover_table_metadata
-from dmp_to_parquet.planner import hash_bucket_query, null_bucket_query
+from oracle_dmp_converter.oracle.exporter import export_table
+from oracle_dmp_converter.oracle.identifiers import filesystem_safe_identifier
+from oracle_dmp_converter.oracle.metadata import discover_table_metadata
+from oracle_dmp_converter.planner import hash_bucket_query, null_bucket_query
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,8 +61,8 @@ class OracleAdminConnection:
 class ChunkConversionResult:
     name: str
     imported_rows: int
-    parquet_rows: int
-    parquet_path: Path
+    output_rows: int
+    output_path: Path
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ class TableConversionResult:
 
     @property
     def rows(self) -> int:
-        return sum(chunk.parquet_rows for chunk in self.chunks)
+        return sum(chunk.output_rows for chunk in self.chunks)
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class OracleDumpConverter:
         directory: str = "DATA_PUMP_DIR",
         directory_path: str = "/opt/oracle/admin/FREE/dpdump",
         stage_password: str = "StagePwd_123",
+        output_format: OutputFormat = OutputFormat.PARQUET,
     ) -> None:
         self.container = container
         self.admin = admin
@@ -103,6 +105,7 @@ class OracleDumpConverter:
         self.directory = directory
         self.directory_path = directory_path.rstrip("/")
         self.stage_password = stage_password
+        self.output_format = output_format
         self._inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")
         self._convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")
         # Set during discover_dump_tables(); defaults to DATAPUMP until
@@ -215,7 +218,7 @@ class OracleDumpConverter:
         ("The file may be an original export dump file" — emitted by 23ai
         Free), the dump was produced by legacy ``exp``; we set
         :attr:`dump_format` to
-        :attr:`~dmp_to_parquet.models.DumpFormat.LEGACY` and fall back to
+        :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and fall back to
         ``imp INDEXFILE=``.  Any other ``impdp`` failure is re-raised as-is.
         """
         sqlfile = "dmp2parquet-discovery.sql"
@@ -261,7 +264,7 @@ class OracleDumpConverter:
         """Inspect the dump, auto-detecting format, and return a manifest.
 
         When the dump is a legacy ``exp`` file, :attr:`dump_format` is set
-        to :attr:`~dmp_to_parquet.models.DumpFormat.LEGACY` and ``imp``
+        to :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and ``imp``
         is used for all subsequent operations.
         """
         # First pass: try Data Pump path; on LegacyDumpError switch to imp.
@@ -274,7 +277,9 @@ class OracleDumpConverter:
         tables: list[TableMetadata] = []
         for source_schema, table in schema_tables:
             stage_schema = self._stage_schema_for(source_schema)
-            LOGGER.debug("Inspecting %s.%s via staging schema %s", source_schema, table, stage_schema)
+            LOGGER.debug(
+                "Inspecting %s.%s via staging schema %s", source_schema, table, stage_schema
+            )
             self._metadata_import_table(source_schema, table)
             try:
                 with self._connect() as conn:
@@ -362,22 +367,24 @@ class OracleDumpConverter:
             / filesystem_safe_identifier(source_schema)
             / filesystem_safe_identifier(table)
         )
-        parquet_path = table_dir / f"{filesystem_safe_identifier(chunk_name)}.parquet"
+        ext = self.output_format.value
+        output_path = table_dir / f"{filesystem_safe_identifier(chunk_name)}.{ext}"
         with self._connect() as conn:
             metadata = discover_table_metadata(conn, stage_schema, table)
             imported_rows = count_rows(conn, stage_schema, table)
-            export_result = export_table_to_parquet(
+            export_result = export_table(
                 conn,
                 schema_name=stage_schema,
                 table_name=table,
                 columns=metadata.columns,
-                output_path=parquet_path,
+                output_path=output_path,
+                output_format=self.output_format,
             )
         return ChunkConversionResult(
             name=chunk_name,
             imported_rows=imported_rows,
-            parquet_rows=export_result.rows,
-            parquet_path=export_result.path,
+            output_rows=export_result.rows,
+            output_path=export_result.path,
         )
 
     def drop_stage_table(self, source_schema: str, table: str) -> None:
@@ -479,18 +486,19 @@ class OracleDumpConverter:
         for chunk in table_plan.chunks:
             state = state_store.get(table_plan.qualified_name, chunk.name) if state_store else None
             if state and state.status == "completed":
-                parquet_path = (
+                ext = self.output_format.value
+                output_path = (
                     output_dir
                     / filesystem_safe_identifier(table_plan.schema)
                     / filesystem_safe_identifier(table_plan.table)
-                    / f"{filesystem_safe_identifier(chunk.name)}.parquet"
+                    / f"{filesystem_safe_identifier(chunk.name)}.{ext}"
                 )
                 chunk_results.append(
                     ChunkConversionResult(
                         name=chunk.name,
                         imported_rows=state.imported_rows or 0,
-                        parquet_rows=state.parquet_rows or 0,
-                        parquet_path=parquet_path,
+                        output_rows=state.output_rows or 0,
+                        output_path=output_path,
                     )
                 )
                 continue
@@ -503,10 +511,10 @@ class OracleDumpConverter:
                     chunk=chunk,
                     output_dir=output_dir,
                 )
-                if result.imported_rows != result.parquet_rows:
+                if result.imported_rows != result.output_rows:
                     msg = (
                         f"row count mismatch for {table_plan.qualified_name} {chunk.name}: "
-                        f"imported={result.imported_rows}, parquet={result.parquet_rows}"
+                        f"imported={result.imported_rows}, output={result.output_rows}"
                     )
                     raise ValueError(msg)
                 if state_store:
@@ -516,7 +524,7 @@ class OracleDumpConverter:
                             chunk.name,
                             "completed",
                             result.imported_rows,
-                            result.parquet_rows,
+                            result.output_rows,
                         )
                     )
                 chunk_results.append(result)
