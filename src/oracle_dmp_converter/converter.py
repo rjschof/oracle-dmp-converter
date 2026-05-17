@@ -98,7 +98,7 @@ class OracleDumpConverter:
         directory_path: str = "/opt/oracle/admin/FREE/dpdump",
         stage_password: str = "StagePwd_123",
         output_format: OutputFormat = OutputFormat.PARQUET,
-        config: ConverterConfig = ConverterConfig(),
+        config: ConverterConfig | None = None,
     ) -> None:
         self.container = container
         self.admin = admin
@@ -108,7 +108,7 @@ class OracleDumpConverter:
         self.directory_path = directory_path.rstrip("/")
         self.stage_password = stage_password
         self.output_format = output_format
-        self.config = config
+        self.config = config if config is not None else ConverterConfig()
         self._inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")
         self._convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")
         # Set during discover_dump_tables(); defaults to DATAPUMP until

@@ -11,7 +11,11 @@ from rich.console import Console
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, load_config
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
-from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.docker_oracle import (
+    DEFAULT_CONTAINER_RUNTIME,
+    DockerOracle,
+    docker_available,
+)
 from oracle_dmp_converter.errors import LegacyDumpError
 from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
 from oracle_dmp_converter.io.state import StateStore
@@ -26,6 +30,10 @@ DEFAULT_DUMP_DIRECTORY = "ORACLE_DMC_DUMP"
 DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
 
 
+def _default_runtime() -> str:
+    return os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME)
+
+
 @click.group()
 def main() -> None:
     """Convert Oracle Data Pump dumps to Parquet, Avro, or CSV."""
@@ -37,13 +45,19 @@ def main() -> None:
 
 
 @main.command()
-def doctor() -> None:
+@click.option(
+    "--container-runtime",
+    default=_default_runtime,
+    show_default="docker",
+    help="Container runtime to use (docker or podman).",
+)
+def doctor(container_runtime: str) -> None:
     """Check local runtime prerequisites."""
 
-    if docker_available():
-        console.print("[green]Docker is available[/green]")
+    if docker_available(container_runtime):
+        console.print(f"[green]{container_runtime} is available[/green]")
     else:
-        raise click.ClickException("Docker is not available")
+        raise click.ClickException(f"{container_runtime} is not available")
     console.print("[green]Python dependencies are importable[/green]")
 
 
@@ -94,7 +108,7 @@ def _build_converter(
     work_dir: Path,
     dumpfiles: tuple[str, ...],
     output_format: OutputFormat = OutputFormat.PARQUET,
-    config: ConverterConfig = ConverterConfig(),
+    config: ConverterConfig | None = None,
 ) -> OracleDumpConverter:
     return OracleDumpConverter(
         container=container,
@@ -135,12 +149,19 @@ def _build_converter(
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
+@click.option(
+    "--container-runtime",
+    default=_default_runtime,
+    show_default="docker",
+    help="Container runtime to use (docker or podman).",
+)
 def inspect(
     dump_paths: tuple[Path, ...],
     work_dir: Path,
     manifest_path: Path,
     oracle_image: str,
     oracle_password: str,
+    container_runtime: str,
 ) -> None:
     """Inspect a full Data Pump dump and write a manifest."""
 
@@ -149,6 +170,7 @@ def inspect(
         image=oracle_image,
         password=oracle_password,
         mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+        runtime=container_runtime,
     ) as container:
         console.print(f"Started Oracle container [bold]{container.name}[/bold]")
         container.wait_ready()
@@ -240,6 +262,12 @@ def plan_command(
     show_default="gvenzl/oracle-free:23-faststart",
 )
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
+@click.option(
+    "--container-runtime",
+    default=_default_runtime,
+    show_default="docker",
+    help="Container runtime to use (docker or podman).",
+)
 def convert(
     plan_path: Path | None,
     dump_paths: tuple[Path, ...],
@@ -249,6 +277,7 @@ def convert(
     work_dir: Path,
     oracle_image: str,
     oracle_password: str,
+    container_runtime: str,
 ) -> None:
     """Convert all tables in a plan, or inspect/plan/convert in one command."""
 
@@ -270,6 +299,7 @@ def convert(
         image=image,
         password=oracle_password,
         mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+        runtime=container_runtime,
     ) as container:
         console.print(f"Started Oracle container [bold]{container.name}[/bold]")
         container.wait_ready()
@@ -348,6 +378,12 @@ def convert(
         "Safe to disable with --no-null-bucket when the split column is NOT NULL."
     ),
 )
+@click.option(
+    "--container-runtime",
+    default=_default_runtime,
+    show_default="docker",
+    help="Container runtime to use (docker or podman).",
+)
 def convert_hash_table(
     dump_paths: tuple[Path, ...],
     source_schema: str,
@@ -360,6 +396,7 @@ def convert_hash_table(
     oracle_image: str,
     oracle_password: str,
     include_null_bucket: bool,
+    container_runtime: str,
 ) -> None:
     """Convert one table from a dump using Data Pump QUERY hash buckets."""
 
@@ -371,7 +408,8 @@ def convert_hash_table(
     with DockerOracle.start(
         image=oracle_image,
         password=oracle_password,
-        mounts=((dump_dir, "/dumps", "rw"),),
+        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+        runtime=container_runtime,
     ) as container:
         console.print(f"Started Oracle container [bold]{container.name}[/bold]")
         container.wait_ready()

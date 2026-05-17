@@ -103,9 +103,7 @@ def setup_reporting_schema(host: str, port: int, service: str) -> None:
     ) as conn:
         drop_schema(conn, REPORTING_SCHEMA)
         with conn.cursor() as cur:
-            cur.execute(
-                f'CREATE USER {REPORTING_SCHEMA} IDENTIFIED BY "{SCHEMA_PASSWORD}"'
-            )
+            cur.execute(f'CREATE USER {REPORTING_SCHEMA} IDENTIFIED BY "{SCHEMA_PASSWORD}"')
             cur.execute(f"GRANT CONNECT, RESOURCE TO {REPORTING_SCHEMA}")
             cur.execute(f"ALTER USER {REPORTING_SCHEMA} QUOTA UNLIMITED ON USERS")
 
@@ -132,8 +130,7 @@ def setup_reporting_schema(host: str, port: int, service: str) -> None:
 
             reports = [(i, f"Report {i}") for i in range(1, 11)]
             cur.executemany(
-                f"INSERT INTO {REPORTING_SCHEMA}.REPORTS(REPORT_ID, REPORT_NAME)"
-                " VALUES (:1, :2)",
+                f"INSERT INTO {REPORTING_SCHEMA}.REPORTS(REPORT_ID, REPORT_NAME) VALUES (:1, :2)",
                 reports,
             )
 

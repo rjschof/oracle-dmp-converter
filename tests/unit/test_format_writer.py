@@ -111,9 +111,7 @@ class TestAvroFormatWriter:
         schema = pa.schema([pa.field("price", pa.decimal128(10, 2))])
         path = tmp_path / "dec.avro"
         values = [Decimal("12.34"), Decimal("99.99")]
-        table = pa.Table.from_arrays(
-            [pa.array(values, type=pa.decimal128(10, 2))], schema=schema
-        )
+        table = pa.Table.from_arrays([pa.array(values, type=pa.decimal128(10, 2))], schema=schema)
         writer = AvroFormatWriter(path, schema)
         writer.write_batch(table)
         writer.close()

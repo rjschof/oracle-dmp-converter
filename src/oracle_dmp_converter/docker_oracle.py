@@ -1,7 +1,8 @@
-"""Docker lifecycle for Oracle Database Free."""
+"""Container lifecycle for Oracle Database Free (Docker and Podman)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -28,10 +29,12 @@ from oracle_dmp_converter.errors import (
 
 LOGGER = logging.getLogger(__name__)
 
+DEFAULT_CONTAINER_RUNTIME = "docker"
 
-def docker_available() -> bool:
+
+def docker_available(runtime: str = DEFAULT_CONTAINER_RUNTIME) -> bool:
     result = subprocess.run(
-        ["docker", "version", "--format", "{{json .Server.Version}}"],
+        [runtime, "version", "--format", "{{json .Server.Version}}"],
         capture_output=True,
         text=True,
         check=False,
@@ -39,16 +42,49 @@ def docker_available() -> bool:
     return result.returncode == 0
 
 
-def _docker_client() -> docker.DockerClient:
+def _podman_socket_url() -> str | None:
+    """Return a ``unix://`` URL for the first running Podman machine, or ``None``."""
     try:
+        result = subprocess.run(
+            ["podman", "machine", "inspect"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        machines = json.loads(result.stdout)
+        for machine in machines:
+            if machine.get("State", "").lower() != "running":
+                continue
+            path = machine.get("ConnectionInfo", {}).get("PodmanSocket", {}).get("Path")
+            if path and Path(path).exists():
+                return f"unix://{path}"
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _docker_client(runtime: str = DEFAULT_CONTAINER_RUNTIME) -> docker.DockerClient:
+    try:
+        if runtime == "podman" and not os.environ.get("DOCKER_HOST"):
+            socket_url = _podman_socket_url()
+            if socket_url:
+                LOGGER.debug("Connecting to Podman socket at %s", socket_url)
+                return docker.DockerClient(base_url=socket_url)
         return docker.from_env()
     except DockerException as exc:
         raise DockerError(str(exc)) from exc
 
 
-def _run_docker_cp(host_path: Path, container_name: str, container_path: str) -> None:
+def _run_docker_cp(
+    host_path: Path,
+    container_name: str,
+    container_path: str,
+    runtime: str = DEFAULT_CONTAINER_RUNTIME,
+) -> None:
     result = subprocess.run(
-        ["docker", "cp", str(host_path), f"{container_name}:{container_path}"],
+        [runtime, "cp", str(host_path), f"{container_name}:{container_path}"],
         capture_output=True,
         text=True,
         check=False,
@@ -57,7 +93,7 @@ def _run_docker_cp(host_path: Path, container_name: str, container_path: str) ->
         msg = (
             result.stderr.strip()
             or result.stdout.strip()
-            or f"docker cp failed: {host_path} -> {container_name}:{container_path}"
+            or f"{runtime} cp failed: {host_path} -> {container_name}:{container_path}"
         )
         raise DockerExecError(msg)
 
@@ -100,6 +136,7 @@ class DockerOracle:
     name: str = field(default_factory=lambda: f"oracle-dmp-converter-{uuid.uuid4().hex[:12]}")
     platform: str | None = None
     mounts: tuple[tuple[Path, str, str], ...] = ()
+    runtime: str = DEFAULT_CONTAINER_RUNTIME
     started: bool = False
     _client: docker.DockerClient | None = field(default=None, init=False, repr=False)
     _container: Any | None = field(default=None, init=False, repr=False)
@@ -114,6 +151,7 @@ class DockerOracle:
         name: str | None = None,
         platform: str | None = None,
         mounts: tuple[tuple[Path, str, str], ...] = (),
+        runtime: str | None = None,
     ) -> DockerOracle:
         container = cls(
             image=image or DEFAULT_ORACLE_IMAGE,
@@ -122,6 +160,8 @@ class DockerOracle:
             name=name or f"oracle-dmp-converter-{uuid.uuid4().hex[:12]}",
             platform=platform or os.environ.get("ORACLE_DMP_CONVERTER_DOCKER_PLATFORM"),
             mounts=mounts,
+            runtime=runtime
+            or os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME),
         )
         container._start_container()
         return container
@@ -133,7 +173,7 @@ class DockerOracle:
             volumes[str(prepared)] = {"bind": container_path, "mode": mode}
 
         ports = {"1521/tcp": ("127.0.0.1", None)}
-        self._client = _docker_client()
+        self._client = _docker_client(self.runtime)
         try:
             self._container = self._client.containers.run(
                 self.image,
@@ -189,20 +229,24 @@ class DockerOracle:
     def exec(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         # Use subprocess rather than the Docker SDK's exec_run: exec_run blocks
         # indefinitely when the container stops mid-exec because the HTTP chunked
-        # stream never sends EOF. The docker exec CLI exits cleanly in that scenario.
+        # stream never sends EOF. The docker/podman exec CLI exits cleanly in that scenario.
         result = subprocess.run(
-            ["docker", "exec", self.name, *args],
+            [self.runtime, "exec", self.name, *args],
             capture_output=True,
             text=True,
             check=False,
         )
         if check and result.returncode != 0:
-            msg = result.stderr.strip() or result.stdout.strip() or f"docker exec failed: {args}"
+            msg = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"{self.runtime} exec failed: {args}"
+            )
             raise DockerExecError(msg)
         return result
 
     def copy_to(self, host_path: Path, container_path: str) -> None:
-        _run_docker_cp(host_path, self.name, container_path)
+        _run_docker_cp(host_path, self.name, container_path, self.runtime)
 
     def wait_ready(self, timeout_seconds: int = 600) -> None:
         deadline = time.monotonic() + timeout_seconds

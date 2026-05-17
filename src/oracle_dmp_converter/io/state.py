@@ -48,10 +48,7 @@ class StateStore:
         )
         if cursor.fetchone() is None:
             return  # table doesn't exist yet; nothing to migrate
-        col_names = {
-            row[1]
-            for row in self.conn.execute("PRAGMA table_info(chunks)").fetchall()
-        }
+        col_names = {row[1] for row in self.conn.execute("PRAGMA table_info(chunks)").fetchall()}
         if "parquet_rows" in col_names and "output_rows" not in col_names:
             LOGGER.info("Migrating state.sqlite: renaming parquet_rows → output_rows")
             self.conn.execute("ALTER TABLE chunks RENAME COLUMN parquet_rows TO output_rows")
