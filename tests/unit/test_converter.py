@@ -7,7 +7,14 @@ from unittest.mock import MagicMock, patch
 
 from oracle_dmp_converter.config import ColumnOverride, ConverterConfig
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
-from oracle_dmp_converter.models import ColumnMetadata, TableMetadata
+from oracle_dmp_converter.models import (
+    ChunkPlan,
+    ColumnMetadata,
+    ConversionPlan,
+    TableMetadata,
+    TablePlan,
+    TableStrategy,
+)
 
 
 def _make_converter(config: ConverterConfig) -> OracleDumpConverter:
@@ -111,3 +118,59 @@ def test_export_stage_table_no_overrides_passes_none(tmp_path: Path) -> None:
 
     call_kwargs = mock_export.call_args.kwargs
     assert call_kwargs.get("column_overrides") is None
+
+
+def test_convert_plan_skips_unsupported_tables(tmp_path: Path) -> None:
+    """convert_plan() must skip UNSUPPORTED tables with a warning, not raise."""
+    converter = _make_converter(ConverterConfig())
+
+    unsupported_plan = TablePlan(
+        schema="SRC",
+        table="BROKEN",
+        strategy=TableStrategy.UNSUPPORTED,
+        reason="strategy 'range' is not supported",
+    )
+    good_plan = TablePlan(
+        schema="SRC",
+        table="SMALL",
+        strategy=TableStrategy.WHOLE_TABLE,
+        chunks=(ChunkPlan(name="whole", strategy=TableStrategy.WHOLE_TABLE),),
+    )
+    plan = ConversionPlan(
+        dump_paths=("test.dmp",),
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        tables=(unsupported_plan, good_plan),
+    )
+
+    fake_export = MagicMock()
+    fake_export.rows = 5
+    fake_export.path = tmp_path / "SRC" / "SMALL" / "whole.parquet"
+
+    mock_conn = MagicMock()
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = lambda s: mock_conn
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+
+    fake_metadata = TableMetadata(
+        schema="DMP_SRC",
+        name="SMALL",
+        columns=(ColumnMetadata("ID", "NUMBER", 1, nullable=False),),
+    )
+
+    with (
+        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.converter.drop_table"),
+        patch(
+            "oracle_dmp_converter.converter.discover_table_metadata",
+            return_value=fake_metadata,
+        ),
+        patch("oracle_dmp_converter.converter.count_rows", return_value=5),
+        patch("oracle_dmp_converter.converter.export_table", return_value=fake_export),
+        patch.object(converter, "import_table_chunk"),
+    ):
+        result = converter.convert_plan(plan, tmp_path)
+
+    # Only the good table appears in results; the UNSUPPORTED one is silently skipped.
+    assert len(result.tables) == 1
+    assert result.tables[0].table == "SMALL"

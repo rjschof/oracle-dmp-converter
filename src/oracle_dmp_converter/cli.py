@@ -16,7 +16,6 @@ from oracle_dmp_converter.docker_oracle import (
     DockerOracle,
     docker_available,
 )
-from oracle_dmp_converter.errors import LegacyDumpError
 from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
 from oracle_dmp_converter.io.state import StateStore
 from oracle_dmp_converter.models import ConversionPlan, OutputFormat
@@ -217,12 +216,11 @@ def plan_command(
 
     manifest = load_manifest(manifest_path)
     config = load_config(config_path)
-    table_plans = plan_tables(manifest.tables, config)
+    table_plans = plan_tables(manifest.tables, config, dump_format=manifest.dump_format)
     plan = ConversionPlan(
         dump_paths=manifest.dump_paths,
         tables=table_plans,
         oracle_image=config.oracle_image,
-        max_stage_gb=config.max_stage_gb,
         dump_format=manifest.dump_format,
     )
     save_plan(plan_path, plan)
@@ -317,9 +315,8 @@ def convert(
             manifest = converter.inspect_dump()
             plan = ConversionPlan(
                 dump_paths=tuple(str(path) for path in resolved_dump_paths),
-                tables=plan_tables(manifest.tables, config),
+                tables=plan_tables(manifest.tables, config, dump_format=manifest.dump_format),
                 oracle_image=image,
-                max_stage_gb=config.max_stage_gb,
                 dump_format=manifest.dump_format,
             )
             save_manifest(work_dir / "manifest.json", manifest)
@@ -332,123 +329,4 @@ def convert(
             state_store.close()
         console.print(
             f"[green]Converted {result.rows} rows across {len(result.tables)} tables[/green]"
-        )
-
-
-@main.command("convert-hash-table")
-@click.option(
-    "--dump",
-    "dump_paths",
-    multiple=True,
-    type=click.Path(exists=True, path_type=Path),
-    required=True,
-)
-@click.option("--source-schema", required=True)
-@click.option("--table", "table_name", required=True)
-@click.option("--split-column", required=True)
-@click.option("--buckets", default=64, show_default=True, type=int)
-@click.option("--output", "output_dir", type=click.Path(path_type=Path), required=True)
-@click.option(
-    "--format",
-    "output_format",
-    type=click.Choice(["parquet", "avro", "csv"], case_sensitive=False),
-    default="parquet",
-    show_default=True,
-    help="Output file format.",
-)
-@click.option(
-    "--work-dir",
-    type=click.Path(path_type=Path),
-    default=Path("work"),
-    show_default=True,
-)
-@click.option(
-    "--oracle-image",
-    default=lambda: os.environ.get("ORACLE_DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE),
-    show_default="gvenzl/oracle-free:23-faststart",
-)
-@click.option("--oracle-password", default="OraclePwd_123", show_default=True)
-@click.option(
-    "--null-bucket/--no-null-bucket",
-    "include_null_bucket",
-    default=True,
-    show_default=True,
-    help=(
-        "Include an extra import pass for NULL values in the split column. "
-        "Safe to disable with --no-null-bucket when the split column is NOT NULL."
-    ),
-)
-@click.option(
-    "--container-runtime",
-    default=_default_runtime,
-    show_default="docker",
-    help="Container runtime to use (docker or podman).",
-)
-def convert_hash_table(
-    dump_paths: tuple[Path, ...],
-    source_schema: str,
-    table_name: str,
-    split_column: str,
-    buckets: int,
-    output_dir: Path,
-    output_format: str,
-    work_dir: Path,
-    oracle_image: str,
-    oracle_password: str,
-    include_null_bucket: bool,
-    container_runtime: str,
-) -> None:
-    """Convert one table from a dump using Data Pump QUERY hash buckets."""
-
-    if buckets < 1:
-        raise click.ClickException("--buckets must be at least 1")
-    fmt = OutputFormat(output_format.lower())
-    dump_dir, dumpfiles = _validate_dump_paths(dump_paths)
-
-    with DockerOracle.start(
-        image=oracle_image,
-        password=oracle_password,
-        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
-        runtime=container_runtime,
-    ) as container:
-        console.print(f"Started Oracle container [bold]{container.name}[/bold]")
-        container.wait_ready()
-        port = container.mapped_port()
-        admin = OracleAdminConnection(
-            host="localhost",
-            port=port,
-            service=container.service,
-            user="system",
-            password=oracle_password,
-        )
-        with oracle_connection(
-            host=admin.host,
-            port=admin.port,
-            service=admin.service,
-            user=admin.user,
-            password=admin.password,
-        ) as conn:
-            create_directory(conn, DEFAULT_DUMP_DIRECTORY, DEFAULT_CONTAINER_DUMP_PATH)
-        converter = OracleDumpConverter(
-            container=container,
-            admin=admin,
-            work_dir=work_dir,
-            dumpfiles=dumpfiles,
-            directory=DEFAULT_DUMP_DIRECTORY,
-            directory_path=DEFAULT_CONTAINER_DUMP_PATH,
-            output_format=fmt,
-        )
-        try:
-            result = converter.convert_hash_table(
-                source_schema=source_schema,
-                table=table_name,
-                split_column=split_column,
-                buckets=buckets,
-                output_dir=output_dir,
-                include_null_bucket=include_null_bucket,
-            )
-        except LegacyDumpError as exc:
-            raise click.ClickException(str(exc)) from exc
-        console.print(
-            f"[green]Converted {result.rows} rows from {source_schema}.{table_name}[/green]"
         )

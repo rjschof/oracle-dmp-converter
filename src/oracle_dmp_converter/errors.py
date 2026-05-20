@@ -44,7 +44,3 @@ class LegacyDumpError(DataPumpError):
     DataPumpError still handle it correctly.  Callers that need to
     distinguish the legacy-format case can catch LegacyDumpError first.
     """
-
-
-class PlanningError(DmpToParquetError):
-    """Raised when a table cannot be planned safely."""

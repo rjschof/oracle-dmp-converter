@@ -21,7 +21,7 @@ def test_export_parfile_full_dump_with_schema_include() -> None:
     assert "INCLUDE=SCHEMA:\"IN ('SRC')\"" in text
 
 
-def test_import_parfile_hash_query() -> None:
+def test_import_parfile_partition_import() -> None:
     text = render_import_parfile(
         ImportJob(
             connection=DataPumpConnection("system", "pw"),
@@ -29,13 +29,13 @@ def test_import_parfile_hash_query() -> None:
             dumpfiles=("full.dmp",),
             logfile="imp.log",
             source_schema="SRC",
-            table="BIG_TABLE",
+            table="PART_TABLE",
             remap_schema=("SRC", "DMP_STAGE"),
-            query="ID IS NOT NULL AND ORA_HASH(ID, 3) = 0",
+            partition_name="P_HIGH",
         )
     )
-    assert "TABLES=SRC.BIG_TABLE" in text
+    assert "TABLES=SRC.PART_TABLE:P_HIGH" in text
     assert "REMAP_SCHEMA=SRC:DMP_STAGE" in text
-    assert 'QUERY=SRC.BIG_TABLE:"WHERE ID IS NOT NULL AND ORA_HASH(ID, 3) = 0"' in text
     assert "TRANSFORM=SEGMENT_ATTRIBUTES:N" in text
     assert "EXCLUDE=INDEX" in text
+    assert "QUERY" not in text

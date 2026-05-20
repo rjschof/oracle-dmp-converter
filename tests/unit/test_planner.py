@@ -1,18 +1,12 @@
-import pytest
-
 from oracle_dmp_converter.config import ConverterConfig, TableOverride
-from oracle_dmp_converter.errors import PlanningError
 from oracle_dmp_converter.models import (
     ColumnMetadata,
+    DumpFormat,
     PartitionMetadata,
     TableMetadata,
     TableStrategy,
 )
-from oracle_dmp_converter.planner import hash_bucket_query, plan_table
-
-
-def test_hash_bucket_query_uses_ora_hash_max_bucket() -> None:
-    assert hash_bucket_query("ID", 2, 4) == "ID IS NOT NULL AND ORA_HASH(ID, 3) = 2"
+from oracle_dmp_converter.planner import plan_table
 
 
 def test_small_table_plans_whole_import() -> None:
@@ -22,7 +16,7 @@ def test_small_table_plans_whole_import() -> None:
         columns=(ColumnMetadata("ID", "NUMBER", 1, data_precision=10, data_scale=0),),
         estimated_bytes=1024,
     )
-    plan = plan_table(table, ConverterConfig(max_stage_gb=8))
+    plan = plan_table(table, ConverterConfig())
     assert plan.strategy == TableStrategy.WHOLE_TABLE
     assert len(plan.chunks) == 1
 
@@ -35,84 +29,65 @@ def test_partitioned_table_plans_partition_chunks() -> None:
         estimated_bytes=100 * 1024**3,
         partitions=(PartitionMetadata("P1", 1), PartitionMetadata("P2", 2)),
     )
-    plan = plan_table(table, ConverterConfig(max_stage_gb=8))
+    plan = plan_table(table, ConverterConfig())
     assert plan.strategy == TableStrategy.PARTITION
     assert [chunk.partition_name for chunk in plan.chunks] == ["P1", "P2"]
 
 
-def test_large_table_plans_hash_chunks_from_primary_key() -> None:
+def test_whole_strategy_override_forces_whole_table() -> None:
     table = TableMetadata(
         schema="SALES",
         name="FACT",
-        columns=(ColumnMetadata("ID", "NUMBER", 1, nullable=False),),
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
         estimated_bytes=100 * 1024**3,
-        primary_key=("ID",),
+        partitions=(PartitionMetadata("P1", 1), PartitionMetadata("P2", 2)),
     )
-    plan = plan_table(table, ConverterConfig(max_stage_gb=8, default_hash_buckets=4))
-    assert plan.strategy == TableStrategy.HASH
-    assert plan.split_column == "ID"
-    assert len(plan.chunks) == 4
+    plan = plan_table(
+        table,
+        ConverterConfig(tables={"SALES.FACT": TableOverride(strategy="whole")}),
+    )
+    assert plan.strategy == TableStrategy.WHOLE_TABLE
+    assert len(plan.chunks) == 1
 
 
-def test_large_nullable_table_adds_null_bucket() -> None:
+def test_legacy_format_table_plans_whole_table() -> None:
+    """Legacy (exp) dumps always produce WHOLE_TABLE plans, even for partitioned tables."""
     table = TableMetadata(
         schema="SALES",
         name="FACT",
-        columns=(ColumnMetadata("CUSTOMER_ID", "NUMBER", 1, nullable=True),),
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
         estimated_bytes=100 * 1024**3,
+        partitions=(PartitionMetadata("P1", 1), PartitionMetadata("P2", 2)),
     )
-    plan = plan_table(table, ConverterConfig(max_stage_gb=8, default_hash_buckets=4))
-    assert len(plan.chunks) == 5
-    assert plan.chunks[-1].query == "CUSTOMER_ID IS NULL"
+    plan = plan_table(table, ConverterConfig(), dump_format=DumpFormat.LEGACY)
+    assert plan.strategy == TableStrategy.WHOLE_TABLE
+    assert len(plan.chunks) == 1
 
 
-def test_override_split_column_and_buckets() -> None:
+def test_unrecognized_strategy_returns_unsupported() -> None:
+    """An unknown strategy override must produce an UNSUPPORTED plan with a clear reason."""
     table = TableMetadata(
         schema="SALES",
         name="FACT",
-        columns=(ColumnMetadata("TENANT_ID", "NUMBER", 1, nullable=False),),
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
         estimated_bytes=100 * 1024**3,
     )
     plan = plan_table(
         table,
-        ConverterConfig(
-            max_stage_gb=8,
-            tables={
-                "SALES.FACT": TableOverride(
-                    strategy="hash",
-                    split_column="TENANT_ID",
-                    buckets=8,
-                )
-            },
-        ),
+        ConverterConfig(tables={"SALES.FACT": TableOverride(strategy="range")}),
     )
-    assert len(plan.chunks) == 8
-    assert plan.split_column == "TENANT_ID"
+    assert plan.strategy == TableStrategy.UNSUPPORTED
+    assert plan.reason is not None
+    assert "range" in plan.reason
 
 
-def test_override_split_column_non_hash_candidate_raises_planning_error() -> None:
-    """A config override naming a LOB/non-scalar split column must fail at plan
-    time with a clear PlanningError rather than silently passing and failing
-    at runtime inside Oracle."""
+def test_chunk_names_are_zero_padded() -> None:
     table = TableMetadata(
         schema="SALES",
-        name="DOCUMENTS",
-        columns=(
-            ColumnMetadata("ID", "NUMBER", 1, nullable=False),
-            ColumnMetadata("BODY", "CLOB", 2, nullable=True),
-        ),
-        estimated_bytes=100 * 1024**3,
+        name="FACT",
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
+        partitions=(PartitionMetadata("P_NORTH", 1), PartitionMetadata("P_SOUTH", 2)),
     )
-    with pytest.raises(PlanningError, match="CLOB"):
-        plan_table(
-            table,
-            ConverterConfig(
-                max_stage_gb=8,
-                tables={
-                    "SALES.DOCUMENTS": TableOverride(
-                        strategy="hash",
-                        split_column="BODY",
-                    )
-                },
-            ),
-        )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.chunks[0].name == "partition-00001-P_NORTH"
+    assert plan.chunks[1].name == "partition-00002-P_SOUTH"

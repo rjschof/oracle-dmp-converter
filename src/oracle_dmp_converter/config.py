@@ -17,9 +17,6 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class TableOverride:
     strategy: str | None = None
-    split_column: str | None = None
-    buckets: int | None = None
-    force_large: bool = False
 
 
 @dataclass(frozen=True)
@@ -31,14 +28,8 @@ class ColumnOverride:
 @dataclass(frozen=True)
 class ConverterConfig:
     oracle_image: str = DEFAULT_ORACLE_IMAGE
-    max_stage_gb: int = 8
-    default_hash_buckets: int = 64
     tables: dict[str, TableOverride] = field(default_factory=dict)
     columns: dict[str, ColumnOverride] = field(default_factory=dict)
-
-    @property
-    def max_stage_bytes(self) -> int:
-        return self.max_stage_gb * 1024**3
 
 
 def load_config(path: Path | None) -> ConverterConfig:
@@ -54,10 +45,6 @@ def load_config(path: Path | None) -> ConverterConfig:
     }
     return ConverterConfig(
         oracle_image=oracle.get("image", DEFAULT_ORACLE_IMAGE),
-        max_stage_gb=int(oracle.get("max_stage_gb", 8)),
-        default_hash_buckets=int(
-            data.get("default_hash_buckets", oracle.get("default_hash_buckets", 64))
-        ),
         tables=tables,
         columns=columns,
     )
@@ -82,8 +69,6 @@ def dump_config(config: ConverterConfig) -> dict[str, Any]:
     return {
         "oracle": {
             "image": config.oracle_image,
-            "max_stage_gb": config.max_stage_gb,
-            "default_hash_buckets": config.default_hash_buckets,
         },
         "tables": {name: vars(value) for name, value in config.tables.items()},
         "columns": {name: vars(value) for name, value in config.columns.items()},

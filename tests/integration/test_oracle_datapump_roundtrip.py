@@ -6,7 +6,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, TableOverride
+from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
 from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ExportJob
 from oracle_dmp_converter.datapump.runner import DataPumpRunner
@@ -102,7 +102,7 @@ def _read_ids(parquet_files: list[Path]) -> set[int]:
     return ids
 
 
-def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
+def test_full_expdp_dump_whole_and_partition(tmp_path: Path) -> None:
     if not docker_available():
         pytest.skip("Docker is not available")
 
@@ -148,22 +148,9 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
             "SMALL_TABLE",
         }
 
-        table_plans = plan_tables(
-            manifest.tables,
-            ConverterConfig(
-                default_hash_buckets=4,
-                tables={
-                    "SRC.BIG_BUCKET_TABLE": TableOverride(
-                        strategy="hash",
-                        split_column="ID",
-                        buckets=4,
-                        force_large=True,
-                    )
-                },
-            ),
-        )
+        table_plans = plan_tables(manifest.tables, ConverterConfig())
         by_name = {table.table: table for table in table_plans}
-        assert by_name["BIG_BUCKET_TABLE"].strategy == TableStrategy.HASH
+        assert by_name["BIG_BUCKET_TABLE"].strategy == TableStrategy.WHOLE_TABLE
         assert by_name["PART_TABLE"].strategy == TableStrategy.PARTITION
         assert by_name["SMALL_TABLE"].strategy == TableStrategy.WHOLE_TABLE
 
@@ -171,7 +158,6 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
             dump_paths=(dumpfile,),
             tables=table_plans,
             oracle_image=image,
-            max_stage_gb=8,
         )
         state = StateStore(tmp_path / "work" / "convert" / "state.sqlite")
         try:
@@ -182,7 +168,7 @@ def test_full_expdp_dump_to_hash_chunked_parquet(tmp_path: Path) -> None:
     big_files = sorted((tmp_path / "parquet" / "SRC" / "BIG_BUCKET_TABLE").glob("*.parquet"))
     part_files = sorted((tmp_path / "parquet" / "SRC" / "PART_TABLE").glob("*.parquet"))
     small_files = sorted((tmp_path / "parquet" / "SRC" / "SMALL_TABLE").glob("*.parquet"))
-    assert len(big_files) == 4
+    assert len(big_files) == 1
     assert len(part_files) == 2
     assert len(small_files) == 1
     assert result.rows == 49

@@ -41,7 +41,6 @@ class ImportJob:
     table: str
     remap_schema: tuple[str, str] | None = None
     content: str | None = None
-    query: str | None = None
     partition_name: str | None = None
     table_exists_action: str = "REPLACE"
     exclude: tuple[str, ...] = field(
@@ -75,10 +74,6 @@ def _table_spec(schema: str, table: str, partition_name: str | None = None) -> s
     return spec
 
 
-def _query_prefix(schema: str, table: str) -> str:
-    return f"{oracle_identifier(schema)}.{oracle_identifier(table)}"
-
-
 def render_export_parfile(job: ExportJob) -> str:
     lines = [
         f"USERID={job.connection.userid}",
@@ -109,9 +104,6 @@ def render_import_parfile(job: ImportJob) -> str:
     if job.remap_schema:
         source, target = job.remap_schema
         lines.append(f"REMAP_SCHEMA={oracle_identifier(source)}:{oracle_identifier(target)}")
-    if job.query:
-        compact_query = " ".join(job.query.split())
-        lines.append(f'QUERY={_query_prefix(job.source_schema, job.table)}:"WHERE {compact_query}"')
     for object_type in job.exclude:
         lines.append(f"EXCLUDE={object_type}")
     return "\n".join(lines) + "\n"

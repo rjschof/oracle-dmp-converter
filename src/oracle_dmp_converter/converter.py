@@ -42,7 +42,6 @@ from oracle_dmp_converter.oracle.conn import (
 from oracle_dmp_converter.oracle.exporter import export_table
 from oracle_dmp_converter.oracle.identifiers import filesystem_safe_identifier
 from oracle_dmp_converter.oracle.metadata import discover_table_metadata
-from oracle_dmp_converter.planner import hash_bucket_query, null_bucket_query
 
 LOGGER = logging.getLogger(__name__)
 
@@ -330,7 +329,6 @@ class OracleDumpConverter:
         source_schema: str,
         table: str,
         chunk_name: str,
-        query: str | None = None,
         partition_name: str | None = None,
     ) -> int:
         stage_schema = self._stage_schema_for(source_schema)
@@ -365,7 +363,6 @@ class OracleDumpConverter:
                 source_schema=source_schema,
                 table=table,
                 remap_schema=(source_schema, stage_schema),
-                query=query,
                 partition_name=partition_name,
             )
             self._convert_runner.run_impdp(job)
@@ -418,73 +415,6 @@ class OracleDumpConverter:
         with self._connect() as conn:
             drop_table(conn, stage_schema, table)
 
-    def convert_hash_table(
-        self,
-        *,
-        source_schema: str,
-        table: str,
-        split_column: str,
-        buckets: int,
-        output_dir: Path,
-        include_null_bucket: bool = True,
-    ) -> TableConversionResult:
-        # Detect the dump format before entering the hash loop.  Legacy exp
-        # dumps cannot be hash-chunked because imp has no QUERY= support.
-        try:
-            self._probe_dump_format()
-        except LegacyDumpError as exc:
-            msg = (
-                f"{source_schema}.{table}: hash chunking requires a Data Pump (expdp) dump; "
-                "this dump was created with legacy exp which does not support QUERY= filtering. "
-                "Re-export the data with expdp to use convert-hash-table."
-            )
-            raise LegacyDumpError(msg) from exc
-
-        self.prepare_stage_schema(source_schema)
-        chunks: list[ChunkConversionResult] = []
-        for bucket_index in range(buckets):
-            chunk_name = f"hash-{bucket_index:05d}-of-{buckets:05d}"
-            query = hash_bucket_query(split_column, bucket_index, buckets)
-            self.import_table_chunk(
-                source_schema=source_schema,
-                table=table,
-                chunk_name=chunk_name,
-                query=query,
-            )
-            try:
-                chunks.append(
-                    self.export_stage_table(
-                        source_schema=source_schema,
-                        table=table,
-                        chunk_name=chunk_name,
-                        output_dir=output_dir,
-                    )
-                )
-            finally:
-                self.drop_stage_table(source_schema, table)
-
-        if include_null_bucket:
-            chunk_name = "hash-null"
-            self.import_table_chunk(
-                source_schema=source_schema,
-                table=table,
-                chunk_name=chunk_name,
-                query=null_bucket_query(split_column),
-            )
-            try:
-                chunks.append(
-                    self.export_stage_table(
-                        source_schema=source_schema,
-                        table=table,
-                        chunk_name=chunk_name,
-                        output_dir=output_dir,
-                    )
-                )
-            finally:
-                self.drop_stage_table(source_schema, table)
-
-        return TableConversionResult(source_schema=source_schema, table=table, chunks=tuple(chunks))
-
     def convert_chunk_plan(
         self,
         *,
@@ -496,7 +426,6 @@ class OracleDumpConverter:
             source_schema=table_plan.schema,
             table=table_plan.table,
             chunk_name=chunk.name,
-            query=chunk.query,
             partition_name=chunk.partition_name,
         )
         try:
@@ -586,6 +515,14 @@ class OracleDumpConverter:
     ) -> PlanConversionResult:
         results: list[TableConversionResult] = []
         for table_plan in plan.tables:
+            if table_plan.strategy == TableStrategy.UNSUPPORTED:
+                LOGGER.warning(
+                    "Skipping %s.%s: %s",
+                    table_plan.schema,
+                    table_plan.table,
+                    table_plan.reason or "unsupported strategy",
+                )
+                continue
             LOGGER.info(
                 "Converting %s.%s (%s)",
                 table_plan.schema,

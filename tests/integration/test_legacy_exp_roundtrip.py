@@ -226,7 +226,6 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
             dump_paths=(dump_filename,),
             tables=table_plans,
             oracle_image=image,
-            max_stage_gb=8,
         )
         state = StateStore(work_dir / "convert" / "state.sqlite")
         try:
@@ -265,7 +264,7 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
 _SAMPLE_DUMP_DIR = Path(__file__).resolve().parent.parent.parent / "sample-data" / "legacy"
 _SAMPLE_DUMP_FILE = _SAMPLE_DUMP_DIR / "legacy_exp_sample.dmp"
 
-# Schema and row counts that scripts/create_legacy_exp_sample.py creates.
+# Schema and row counts expected in the pre-built sample dump.
 _SAMPLE_EXPECTED = {
     "APP": {"PRODUCTS": 20, "ORDERS": 50},
     "REPORTING": {"REPORTS": 10, "METRICS": 15},
@@ -277,8 +276,7 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
 
     This test is skipped when:
     * Docker is unavailable, or
-    * ``sample-data/legacy/legacy_exp_sample.dmp`` does not exist
-      (run ``uv run python scripts/create_legacy_exp_sample.py`` to generate it).
+    * ``sample-data/legacy/legacy_exp_sample.dmp`` does not exist.
 
     It does NOT re-run ``exp``; it just mounts the existing dump file and
     exercises the full detect → inspect → plan → convert pipeline.
@@ -288,7 +286,7 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
     if not _SAMPLE_DUMP_FILE.exists():
         pytest.skip(
             f"Pre-built legacy sample dump not found at {_SAMPLE_DUMP_FILE}; "
-            "run: uv run python scripts/create_legacy_exp_sample.py"
+            "generate it with a legacy exp export and place it there."
         )
 
     image = os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE)
@@ -358,7 +356,6 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
             dump_paths=(dump_filename,),
             tables=table_plans,
             oracle_image=image,
-            max_stage_gb=8,
         )
         state = StateStore(work_dir / "convert" / "state.sqlite")
         try:

@@ -13,7 +13,6 @@ LOGGER = logging.getLogger(__name__)
 class TableStrategy(StrEnum):
     WHOLE_TABLE = "whole_table"
     PARTITION = "partition"
-    HASH = "hash"
     UNSUPPORTED = "unsupported"
 
 
@@ -41,24 +40,6 @@ class ColumnMetadata:
     @property
     def normalized_type(self) -> str:
         return self.data_type.upper()
-
-    @property
-    def is_hash_candidate(self) -> bool:
-        unsupported = {
-            "BFILE",
-            "BLOB",
-            "CLOB",
-            "LONG",
-            "LONG RAW",
-            "NCLOB",
-            "RAW",
-            "ROWID",
-            "UROWID",
-            "XMLTYPE",
-        }
-        if self.normalized_type in unsupported:
-            return False
-        return True
 
 
 @dataclass(frozen=True)
@@ -93,10 +74,7 @@ class TableMetadata:
 class ChunkPlan:
     name: str
     strategy: TableStrategy
-    query: str | None = None
     partition_name: str | None = None
-    bucket_index: int | None = None
-    bucket_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +83,6 @@ class TablePlan:
     table: str
     strategy: TableStrategy
     chunks: tuple[ChunkPlan, ...] = ()
-    split_column: str | None = None
     reason: str | None = None
     warnings: tuple[str, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
@@ -128,6 +105,5 @@ class ConversionPlan:
     dump_paths: tuple[str, ...]
     tables: tuple[TablePlan, ...]
     oracle_image: str
-    max_stage_gb: int
     version: int = 1
     dump_format: DumpFormat = DumpFormat.DATAPUMP

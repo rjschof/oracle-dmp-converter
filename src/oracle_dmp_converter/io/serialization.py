@@ -88,10 +88,7 @@ def chunk_plan_to_dict(chunk: ChunkPlan) -> dict[str, Any]:
     return {
         "name": chunk.name,
         "strategy": chunk.strategy.value,
-        "query": chunk.query,
         "partition_name": chunk.partition_name,
-        "bucket_index": chunk.bucket_index,
-        "bucket_count": chunk.bucket_count,
     }
 
 
@@ -99,10 +96,7 @@ def chunk_plan_from_dict(data: dict[str, Any]) -> ChunkPlan:
     return ChunkPlan(
         name=str(data["name"]),
         strategy=TableStrategy(str(data["strategy"])),
-        query=data.get("query"),
         partition_name=data.get("partition_name"),
-        bucket_index=data.get("bucket_index"),
-        bucket_count=data.get("bucket_count"),
     )
 
 
@@ -112,7 +106,6 @@ def table_plan_to_dict(plan: TablePlan) -> dict[str, Any]:
         "table": plan.table,
         "strategy": plan.strategy.value,
         "chunks": [chunk_plan_to_dict(chunk) for chunk in plan.chunks],
-        "split_column": plan.split_column,
         "reason": plan.reason,
         "warnings": list(plan.warnings),
         "extra": plan.extra,
@@ -125,7 +118,6 @@ def table_plan_from_dict(data: dict[str, Any]) -> TablePlan:
         table=str(data["table"]),
         strategy=TableStrategy(str(data["strategy"])),
         chunks=tuple(chunk_plan_from_dict(chunk) for chunk in data.get("chunks", [])),
-        split_column=data.get("split_column"),
         reason=data.get("reason"),
         warnings=tuple(data.get("warnings", [])),
         extra=dict(data.get("extra", {})),
@@ -161,7 +153,6 @@ def save_plan(path: Path, plan: ConversionPlan) -> None:
         "dump_format": plan.dump_format.value,
         "dump_paths": list(plan.dump_paths),
         "oracle_image": plan.oracle_image,
-        "max_stage_gb": plan.max_stage_gb,
         "tables": [table_plan_to_dict(table_plan) for table_plan in plan.tables],
     }
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
@@ -175,6 +166,5 @@ def load_plan(path: Path) -> ConversionPlan:
         dump_format=DumpFormat(raw_format),
         dump_paths=tuple(data.get("dump_paths", [])),
         oracle_image=str(data["oracle_image"]),
-        max_stage_gb=int(data["max_stage_gb"]),
         tables=tuple(table_plan_from_dict(plan) for plan in data.get("tables", [])),
     )
