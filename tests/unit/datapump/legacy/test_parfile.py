@@ -170,14 +170,14 @@ class TestRenderLegacyIndexfileParfile:
             connection=_conn(),
             files=("/dumps/export.dmp",),
             logfile="imp-indexfile.log",
-            indexfile="/tmp/dmp2parquet-discovery.sql",
+            indexfile="/tmp/dmpconverter-discovery.sql",
             full=True,
         )
         output = render_legacy_indexfile_parfile(job)
         assert "USERID=system/OraclePwd_123@FREEPDB1" in output
         assert "FILE=/dumps/export.dmp" in output
         assert "LOG=imp-indexfile.log" in output
-        assert "INDEXFILE=/tmp/dmp2parquet-discovery.sql" in output
+        assert "INDEXFILE=/tmp/dmpconverter-discovery.sql" in output
         assert "FULL=Y" in output
         assert "OWNER=" not in output
 

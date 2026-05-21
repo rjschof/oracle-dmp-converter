@@ -79,12 +79,12 @@ class DataPumpWorkflow(DumpWorkflow):
         ``discovery-impdp-sqlfile.sql`` (the DDL written by ``impdp``) into
         :attr:`_discovery_dir`.
         """
-        sqlfile = "dmp2parquet-discovery.sql"
+        sqlfile = "dmpconverter-discovery.sql"
         job = SqlFileJob(
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile="dmp2parquet-discovery.log",
+            logfile="dmpconverter-discovery.log",
             sqlfile=sqlfile,
         )
         LOGGER.info("Running impdp SQLFILE discovery (sqlfile=%s)", sqlfile)

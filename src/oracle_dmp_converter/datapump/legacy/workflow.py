@@ -20,9 +20,9 @@ from oracle_dmp_converter.oracle.conn import OracleCredentials
 
 LOGGER = logging.getLogger(__name__)
 
-_INDEXFILE_NAME = "dmp2parquet-legacy-discovery.sql"
+_INDEXFILE_NAME = "dmpconverter-legacy-discovery.sql"
 _INDEXFILE_REMOTE = f"/tmp/{_INDEXFILE_NAME}"
-_DISCOVERY_LOG = "dmp2parquet-legacy-discovery.log"
+_DISCOVERY_LOG = "dmpconverter-legacy-discovery.log"
 
 
 class LegacyDumpWorkflow(DumpWorkflow):

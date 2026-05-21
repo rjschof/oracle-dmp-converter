@@ -188,7 +188,7 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
             password=admin.password,
         ) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("CREATE OR REPLACE DIRECTORY DMP2PARQUET_DUMP AS '/dumps'")
+                cursor.execute("CREATE OR REPLACE DIRECTORY DMPCONVERTER_DUMP AS '/dumps'")
 
         # Step 5: run inspect — should detect legacy format.
         converter = OracleDumpConverter(
@@ -196,7 +196,7 @@ def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
             admin=admin,
             work_dir=work_dir,
             dumpfiles=(dump_filename,),
-            directory="DMP2PARQUET_DUMP",
+            directory="DMPCONVERTER_DUMP",
             directory_path="/dumps",
         )
         manifest = converter.inspect_dump()
@@ -316,14 +316,14 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
             password=admin.password,
         ) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("CREATE OR REPLACE DIRECTORY DMP2PARQUET_DUMP AS '/dumps'")
+                cursor.execute("CREATE OR REPLACE DIRECTORY DMPCONVERTER_DUMP AS '/dumps'")
 
         converter = OracleDumpConverter(
             container=container,
             admin=admin,
             work_dir=work_dir,
             dumpfiles=(dump_filename,),
-            directory="DMP2PARQUET_DUMP",
+            directory="DMPCONVERTER_DUMP",
             directory_path="/dumps",
         )
 
