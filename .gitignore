@@ -9,5 +9,6 @@ build/
 work/
 parquet/
 sample-data/
+tests/runs/
 *.dmp
 *.log

@@ -15,7 +15,7 @@ import pytest
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
-from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.docker_oracle import DockerOracle
 from oracle_dmp_converter.io.state import StateStore
 from oracle_dmp_converter.io.validation import count_parquet_rows
 from oracle_dmp_converter.models import ConversionPlan, DumpFormat, TableStrategy
@@ -62,8 +62,6 @@ def _build_converter(
 
 def test_prebuilt_modern_combined_dump(tmp_path: Path) -> None:
     """Convert the pre-built modern (expdp) combined dump to Parquet."""
-    if not docker_available():
-        pytest.skip("Docker is not available")
     if not _MODERN_DUMP.exists():
         pytest.skip(
             f"Pre-built modern dump not found at {_MODERN_DUMP}; "
@@ -150,8 +148,6 @@ def test_prebuilt_modern_combined_dump(tmp_path: Path) -> None:
 
 def test_prebuilt_legacy_combined_dump(tmp_path: Path) -> None:
     """Convert the pre-built legacy (exp) combined dump to Parquet."""
-    if not docker_available():
-        pytest.skip("Docker is not available")
     if not _LEGACY_DUMP.exists():
         pytest.skip(
             f"Pre-built legacy dump not found at {_LEGACY_DUMP}; "

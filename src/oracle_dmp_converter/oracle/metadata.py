@@ -7,52 +7,9 @@ import logging
 import oracledb
 
 from oracle_dmp_converter.models import ColumnMetadata, PartitionMetadata, TableMetadata
+from oracle_dmp_converter.oracle.conn import _oracle_error_code
 
 LOGGER = logging.getLogger(__name__)
-
-ORACLE_MAINTAINED_SCHEMAS = frozenset(
-    {
-        "ANONYMOUS",
-        "APPQOSSYS",
-        "AUDSYS",
-        "CTXSYS",
-        "DBSFWUSER",
-        "DBSNMP",
-        "DIP",
-        "DVF",
-        "DVSYS",
-        "GGSYS",
-        "GSMADMIN_INTERNAL",
-        "GSMCATUSER",
-        "GSMUSER",
-        "LBACSYS",
-        "MDSYS",
-        "OJVMSYS",
-        "OLAPSYS",
-        "ORDDATA",
-        "ORDPLUGINS",
-        "ORDSYS",
-        "OUTLN",
-        "REMOTE_SCHEDULER_AGENT",
-        "SYS",
-        "SYS$UMF",
-        "SYSBACKUP",
-        "SYSDG",
-        "SYSKM",
-        "SYSRAC",
-        "SYSTEM",
-        "WMSYS",
-        "XDB",
-        "XS$NULL",
-    }
-)
-
-
-def _oracle_error_code(exc: Exception) -> int | None:
-    if not isinstance(exc, oracledb.DatabaseError):
-        return None
-    error = exc.args[0]
-    return getattr(error, "code", None)
 
 
 def _estimated_segment_bytes(

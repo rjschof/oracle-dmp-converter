@@ -1,16 +1,16 @@
-from oracle_dmp_converter.datapump.parfile import (
-    DataPumpConnection,
+from oracle_dmp_converter.datapump.modern.parfile import (
     ExportJob,
     ImportJob,
     render_export_parfile,
     render_import_parfile,
 )
+from oracle_dmp_converter.oracle.conn import OracleCredentials
 
 
 def test_export_parfile_full_dump_with_schema_include() -> None:
     text = render_export_parfile(
         ExportJob(
-            connection=DataPumpConnection("system", "pw"),
+            connection=OracleCredentials("system", "pw"),
             directory="DATA_PUMP_DIR",
             dumpfile="full.dmp",
             logfile="full.log",
@@ -24,7 +24,7 @@ def test_export_parfile_full_dump_with_schema_include() -> None:
 def test_import_parfile_partition_import() -> None:
     text = render_import_parfile(
         ImportJob(
-            connection=DataPumpConnection("system", "pw"),
+            connection=OracleCredentials("system", "pw"),
             directory="DATA_PUMP_DIR",
             dumpfiles=("full.dmp",),
             logfile="imp.log",

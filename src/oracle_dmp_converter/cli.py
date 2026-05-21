@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -139,8 +140,8 @@ def _build_converter(
     "--output",
     "manifest_path",
     type=click.Path(path_type=Path),
-    default=Path("work/manifest.json"),
-    show_default=True,
+    default=None,
+    show_default="<work-dir>/manifest.json",
 )
 @click.option(
     "--oracle-image",
@@ -182,12 +183,12 @@ def inspect(
             dumpfiles=dumpfiles,
         )
         manifest = converter.inspect_dump()
-        manifest = type(manifest)(
+        manifest = replace(
+            manifest,
             dump_paths=tuple(str(path.resolve()) for path in dump_paths),
-            tables=manifest.tables,
-            version=manifest.version,
-            dump_format=manifest.dump_format,
         )
+        if manifest_path is None:
+            manifest_path = work_dir / "manifest.json"
         save_manifest(manifest_path, manifest)
         console.print(f"[green]Wrote manifest with {len(manifest.tables)} tables[/green]")
 
@@ -321,7 +322,8 @@ def convert(
             )
             save_manifest(work_dir / "manifest.json", manifest)
             save_plan(work_dir / "plan.yaml", plan)
-        converter.dump_format = plan.dump_format
+        else:
+            converter.use_format(plan.dump_format)
         state_store = StateStore(work_dir / "convert" / "state.sqlite")
         try:
             result = converter.convert_plan(plan, output_dir, state_store)

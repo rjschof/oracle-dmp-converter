@@ -5,11 +5,11 @@ import logging
 LOGGER = logging.getLogger(__name__)
 
 
-class DmpToParquetError(Exception):
+class ConverterError(Exception):
     """Base exception for converter failures."""
 
 
-class DockerError(DmpToParquetError):
+class DockerError(ConverterError):
     """Raised when Docker cannot start or manage Oracle."""
 
 
@@ -33,7 +33,7 @@ class DockerExecError(DockerError):
     """Raised when executing a command in a container fails."""
 
 
-class DataPumpError(DmpToParquetError):
+class DataPumpError(ConverterError):
     """Raised when expdp or impdp fails."""
 
 

@@ -26,7 +26,7 @@ STRINGIFIED_TYPES = {
 }
 
 
-def parquet_type_name(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
+def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
     if override and override.parquet_type:
         return override.parquet_type
     data_type = column.normalized_type
@@ -48,6 +48,11 @@ def parquet_type_name(column: ColumnMetadata, override: ColumnOverride | None = 
         return "binary"
     if data_type in TIMESTAMP_TYPES:
         return "timestamp_us"
+    LOGGER.warning(
+        "Unknown Oracle type %r for column %s; defaulting to string",
+        data_type,
+        column.name,
+    )
     return "string"
 
 

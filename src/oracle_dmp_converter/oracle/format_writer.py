@@ -14,6 +14,8 @@ import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 
+from oracle_dmp_converter.models import OutputFormat
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -244,15 +246,17 @@ class CsvFormatWriter(FormatWriter):
 # ---------------------------------------------------------------------------
 
 
-def make_writer(output_format: str, path: Path, schema: pa.Schema) -> FormatWriter:
-    """Return a :class:`FormatWriter` for *output_format*.
+_WRITERS: dict[OutputFormat, type[FormatWriter]] = {
+    OutputFormat.PARQUET: ParquetFormatWriter,
+    OutputFormat.AVRO: AvroFormatWriter,
+    OutputFormat.CSV: CsvFormatWriter,
+}
 
-    *output_format* must be one of ``"parquet"``, ``"avro"``, or ``"csv"``.
-    """
-    if output_format == "parquet":
-        return ParquetFormatWriter(path, schema)
-    if output_format == "avro":
-        return AvroFormatWriter(path, schema)
-    if output_format == "csv":
-        return CsvFormatWriter(path, schema)
-    raise ValueError(f"Unknown output format: {output_format!r}")
+
+def make_writer(output_format: OutputFormat, path: Path, schema: pa.Schema) -> FormatWriter:
+    """Return a :class:`FormatWriter` for *output_format*."""
+    try:
+        writer_cls = _WRITERS[OutputFormat(output_format)]
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"Unknown output format: {output_format!r}") from exc
+    return writer_cls(path, schema)

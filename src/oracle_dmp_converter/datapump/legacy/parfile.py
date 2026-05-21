@@ -1,4 +1,4 @@
-"""Legacy Oracle exp/imp parameter file rendering.
+"""Legacy exp/imp parameter file rendering.
 
 The legacy ``exp``/``imp`` utilities pre-date Data Pump and use a
 different parameter format.  Key differences from Data Pump parfiles:
@@ -23,27 +23,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from oracle_dmp_converter.oracle.conn import OracleCredentials
+
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class LegacyConnection:
-    """Credentials for legacy exp/imp utilities."""
-
-    user: str
-    password: str
-    service: str = "FREEPDB1"
-
-    @property
-    def userid(self) -> str:
-        return f"{self.user}/{self.password}@{self.service}"
 
 
 @dataclass(frozen=True)
 class LegacyExportJob:
     """Parameter specification for a legacy ``exp`` export job."""
 
-    connection: LegacyConnection
+    connection: OracleCredentials
     # Absolute path(s) inside the container for the output dump file(s).
     files: tuple[str, ...]
     logfile: str
@@ -65,7 +54,7 @@ class LegacyImportJob:
     (equivalent to ``CONTENT=METADATA_ONLY`` in Data Pump).
     """
 
-    connection: LegacyConnection
+    connection: OracleCredentials
     # Absolute path(s) inside the container.
     files: tuple[str, ...]
     logfile: str
@@ -92,7 +81,7 @@ class LegacyIndexFileJob:
     the dump.
     """
 
-    connection: LegacyConnection
+    connection: OracleCredentials
     # Absolute path(s) inside the container.
     files: tuple[str, ...]
     logfile: str

@@ -1,4 +1,10 @@
-"""High-level conversion orchestration."""
+"""High-level conversion orchestration.
+
+Format-specific branching (modern Data Pump vs legacy exp/imp) lives in
+:class:`~oracle_dmp_converter.datapump.workflow.DumpWorkflow` and its
+sub-package implementations.  The converter owns a single ``_workflow``
+attribute and delegates all dump-format-specific work to it.
+"""
 
 from __future__ import annotations
 
@@ -10,17 +16,12 @@ from pathlib import Path
 import oracledb
 
 from oracle_dmp_converter.config import ConverterConfig, column_override
-from oracle_dmp_converter.datapump.imp_show import parse_imp_indexfile_tables
-from oracle_dmp_converter.datapump.legacy_parfile import (
-    LegacyConnection,
-    LegacyImportJob,
-    LegacyIndexFileJob,
+from oracle_dmp_converter.datapump.workflow import (
+    DumpWorkflow,
+    WorkflowConfig,
+    create_workflow,
 )
-from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ImportJob, SqlFileJob
-from oracle_dmp_converter.datapump.runner import DataPumpRunner, is_legacy_format_error
-from oracle_dmp_converter.datapump.sqlfile import parse_sqlfile_tables
 from oracle_dmp_converter.docker_oracle import DockerOracle
-from oracle_dmp_converter.errors import DataPumpError, LegacyDumpError
 from oracle_dmp_converter.io.state import ChunkState, StateStore
 from oracle_dmp_converter.models import (
     ChunkPlan,
@@ -33,10 +34,13 @@ from oracle_dmp_converter.models import (
     TableStrategy,
 )
 from oracle_dmp_converter.oracle.conn import (
+    OracleCredentials,
     count_rows,
     drop_schema,
     drop_table,
     ensure_schema,
+    ensure_tablespace,
+    grant_quota_unlimited,
     oracle_connection,
 )
 from oracle_dmp_converter.oracle.exporter import export_table
@@ -85,7 +89,36 @@ class PlanConversionResult:
         return sum(table.rows for table in self.tables)
 
 
+def _chunk_output_path(
+    *,
+    source_schema: str,
+    table: str,
+    chunk_name: str,
+    output_dir: Path,
+    output_format: OutputFormat,
+) -> Path:
+    """Return the on-disk path for one converted chunk.
+
+    Layout: ``<output_dir>/<schema>/<table>/<chunk>.<ext>`` with names run
+    through :func:`filesystem_safe_identifier`.
+    """
+    return (
+        output_dir
+        / filesystem_safe_identifier(source_schema)
+        / filesystem_safe_identifier(table)
+        / f"{filesystem_safe_identifier(chunk_name)}.{output_format.value}"
+    )
+
+
 class OracleDumpConverter:
+    """Orchestrates inspect → convert against a running Oracle container.
+
+    All dump-format-specific work (impdp vs imp, SQLFILE vs INDEXFILE,
+    parfile syntax) is delegated to :attr:`_workflow`, which is either set
+    by :meth:`inspect_dump` (auto-detected) or :meth:`use_format`
+    (caller-known, e.g. for convert-only runs from a saved plan).
+    """
+
     def __init__(
         self,
         *,
@@ -108,19 +141,88 @@ class OracleDumpConverter:
         self.stage_password = stage_password
         self.output_format = output_format
         self.config = config if config is not None else ConverterConfig()
-        self._inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")
-        self._convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")
-        # Set during discover_dump_tables(); defaults to DATAPUMP until
-        # detection runs.
-        self.dump_format: DumpFormat = DumpFormat.DATAPUMP
+        # Set lazily by inspect_dump() or use_format().
+        self._workflow: DumpWorkflow | None = None
+
+    # ------------------------------------------------------------------
+    # Workflow lifecycle
+    # ------------------------------------------------------------------
+
+    @property
+    def dump_format(self) -> DumpFormat:
+        """Return the detected dump format. Raises if no workflow is set."""
+        if self._workflow is None:
+            raise RuntimeError(
+                "dump_format is unavailable; call inspect_dump() or use_format() first"
+            )
+        return self._workflow.dump_format
+
+    def _credentials(self) -> OracleCredentials:
+        return OracleCredentials(
+            user=self.admin.user,
+            password=self.admin.password,
+            service=self.admin.service,
+        )
+
+    def _workflow_config(self) -> WorkflowConfig:
+        return WorkflowConfig(
+            credentials=self._credentials(),
+            directory=self.directory,
+            directory_path=self.directory_path,
+            dumpfiles=self.dumpfiles,
+            container=self.container,
+            work_dir=self.work_dir,
+        )
+
+    def use_format(self, dump_format: DumpFormat) -> None:
+        """Initialise :attr:`_workflow` for a known dump format.
+
+        Used by convert-only flows where the format is recorded in the
+        saved plan and the auto-detection probe is unnecessary.
+        """
+        # Import here to avoid circular imports.
+        from oracle_dmp_converter.datapump.legacy.workflow import (  # noqa: PLC0415
+            LegacyDumpWorkflow,
+            make_legacy_runners,
+        )
+        from oracle_dmp_converter.datapump.modern.workflow import (  # noqa: PLC0415
+            DataPumpWorkflow,
+            make_modern_runners,
+        )
+
+        cfg = self._workflow_config()
+        if dump_format is DumpFormat.LEGACY:
+            inspect_runner, convert_runner = make_legacy_runners(cfg.container, cfg.work_dir)
+            self._workflow = LegacyDumpWorkflow(
+                credentials=cfg.credentials,
+                directory_path=cfg.directory_path,
+                dumpfiles=cfg.dumpfiles,
+                inspect_runner=inspect_runner,
+                convert_runner=convert_runner,
+            )
+        else:
+            inspect_runner, convert_runner = make_modern_runners(cfg.container, cfg.work_dir)
+            self._workflow = DataPumpWorkflow(
+                credentials=cfg.credentials,
+                directory=cfg.directory,
+                directory_path=cfg.directory_path,
+                dumpfiles=cfg.dumpfiles,
+                inspect_runner=inspect_runner,
+                convert_runner=convert_runner,
+            )
+
+    def _require_workflow(self) -> DumpWorkflow:
+        if self._workflow is None:
+            raise RuntimeError("no active workflow; call inspect_dump() or use_format() first")
+        return self._workflow
+
+    # ------------------------------------------------------------------
+    # Staging schema / connection helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _stage_schema_for(source_schema: str) -> str:
-        """Return the staging schema name for a given source schema.
-
-        The convention is ``DMP_<source_schema>``.  For example, a dump
-        containing schema ``APP`` is imported into ``DMP_APP``.
-        """
+        """Return the staging schema name (``DMP_<source_schema>``)."""
         return f"{_STAGE_SCHEMA_PREFIX}{source_schema}"
 
     def _connect(self) -> AbstractContextManager[oracledb.Connection]:
@@ -132,22 +234,20 @@ class OracleDumpConverter:
             password=self.admin.password,
         )
 
-    def _legacy_connection(self) -> LegacyConnection:
-        return LegacyConnection(
-            user=self.admin.user,
-            password=self.admin.password,
-            service=self.admin.service,
-        )
-
-    def _legacy_files(self) -> tuple[str, ...]:
-        """Absolute paths to dump files inside the container."""
-        return tuple(f"{self.directory_path}/{f}" for f in self.dumpfiles)
+    def _required_tablespaces(self) -> frozenset[str]:
+        """Tablespaces that must exist before importing (legacy dumps only)."""
+        if self._workflow is None:
+            return frozenset()
+        return self._workflow.required_tablespaces()
 
     def prepare_stage_schema(self, source_schema: str) -> None:
         stage_schema = self._stage_schema_for(source_schema)
         LOGGER.debug("Ensuring staging schema %s for source %s", stage_schema, source_schema)
         with self._connect() as conn:
             ensure_schema(conn, stage_schema, self.stage_password)
+            for tablespace in self._required_tablespaces():
+                ensure_tablespace(conn, tablespace)
+                grant_quota_unlimited(conn, stage_schema, tablespace)
 
     def drop_stage_schema(self, source_schema: str) -> None:
         stage_schema = self._stage_schema_for(source_schema)
@@ -155,142 +255,26 @@ class OracleDumpConverter:
         with self._connect() as conn:
             drop_schema(conn, stage_schema)
 
+    def drop_stage_table(self, source_schema: str, table: str) -> None:
+        stage_schema = self._stage_schema_for(source_schema)
+        with self._connect() as conn:
+            drop_table(conn, stage_schema, table)
+
+    # ------------------------------------------------------------------
+    # Inspect
+    # ------------------------------------------------------------------
+
     def _metadata_import_table(self, source_schema: str, table: str) -> None:
         stage_schema = self._stage_schema_for(source_schema)
         self.prepare_stage_schema(source_schema)
         with self._connect() as conn:
             drop_table(conn, stage_schema, table)
-
-        if self.dump_format == DumpFormat.LEGACY:
-            job = LegacyImportJob(
-                connection=self._legacy_connection(),
-                files=self._legacy_files(),
-                logfile=f"imp-meta-{source_schema}-{table}.log"[:120],
-                fromuser=source_schema,
-                touser=stage_schema,
-                tables=(table,),
-                rows=False,
-                indexes=False,
-                grants=False,
-                constraints=False,
-            )
-            self._inspect_runner.run_imp(job)
-        else:
-            job = ImportJob(
-                connection=DataPumpConnection(
-                    self.admin.user, self.admin.password, self.admin.service
-                ),
-                directory=self.directory,
-                dumpfiles=self.dumpfiles,
-                logfile=f"metadata-{source_schema}-{table}.log"[:120],
-                source_schema=source_schema,
-                table=table,
-                remap_schema=(source_schema, stage_schema),
-                content="METADATA_ONLY",
-                exclude=("INDEX", "REF_CONSTRAINT", "TRIGGER"),
-            )
-            self._inspect_runner.run_impdp(job)
-
-    def _discover_legacy_dump_tables(self) -> tuple[tuple[str, str], ...]:
-        """Discover tables in a legacy ``exp`` dump via ``imp INDEXFILE=``."""
-        indexfile = "dmp2parquet-legacy-discovery.sql"
-        remote_indexfile = f"/tmp/{indexfile}"
-        job = LegacyIndexFileJob(
-            connection=self._legacy_connection(),
-            files=self._legacy_files(),
-            logfile="dmp2parquet-legacy-discovery.log",
-            indexfile=remote_indexfile,
-            full=True,
-        )
-        sql_text = self._inspect_runner.run_imp_indexfile(job)
-
-        if not sql_text:
-            # Fall back to reading from the directory path as well (some Oracle
-            # versions write the indexfile there instead of /tmp).
-            alt = self.container.exec(["cat", f"{self.directory_path}/{indexfile}"], check=False)
-            sql_text = alt.stdout if alt.returncode == 0 else ""
-
-        return parse_imp_indexfile_tables(sql_text)
-
-    def _probe_dump_format(self) -> None:
-        """Detect whether the dump is Data Pump (expdp) or legacy (exp) format.
-
-        Runs ``impdp SQLFILE=`` against the dump.  On success the dump is a
-        Data Pump file and :attr:`dump_format` is set to
-        :attr:`~oracle_dmp_converter.models.DumpFormat.DATAPUMP`.
-
-        If ``impdp`` fails with ``ORA-39142`` or ``ORA-39143`` the dump was
-        produced by legacy ``exp``; :attr:`dump_format` is set to
-        :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and
-        :class:`~oracle_dmp_converter.errors.LegacyDumpError` is raised so the
-        caller can switch to the ``imp``-based workflow.
-
-        Any other ``impdp`` failure is re-raised as
-        :class:`~oracle_dmp_converter.errors.DataPumpError`.
-        """
-        sqlfile = "dmp2parquet-discovery.sql"
-        job = SqlFileJob(
-            connection=DataPumpConnection(self.admin.user, self.admin.password, self.admin.service),
-            directory=self.directory,
-            dumpfiles=self.dumpfiles,
-            logfile="dmp2parquet-discovery.log",
-            sqlfile=sqlfile,
-        )
-        try:
-            self._inspect_runner.run_sqlfile(job)
-        except DataPumpError as exc:
-            if not is_legacy_format_error(str(exc)):
-                raise
-            self.dump_format = DumpFormat.LEGACY
-            raise LegacyDumpError(str(exc)) from exc
-        self.dump_format = DumpFormat.DATAPUMP
-
-    def discover_dump_tables(self) -> tuple[tuple[str, str], ...]:
-        """Discover tables in the dump, auto-detecting exp vs expdp format.
-
-        Tries ``impdp SQLFILE=`` first.  If the output contains
-        ``ORA-39142`` (incompatible dump-file version) or ``ORA-39143``
-        ("The file may be an original export dump file" — emitted by 23ai
-        Free), the dump was produced by legacy ``exp``; we set
-        :attr:`dump_format` to
-        :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and fall back to
-        ``imp INDEXFILE=``.  Any other ``impdp`` failure is re-raised as-is.
-        """
-        try:
-            self._probe_dump_format()
-        except LegacyDumpError:
-            return self._discover_legacy_dump_tables()
-
-        # Data Pump succeeded — read the SQLFILE output.
-        sqlfile = "dmp2parquet-discovery.sql"
-        result = self.container.exec(["cat", f"{self.directory_path}/{sqlfile}"], check=False)
-        sql_text = result.stdout if result.returncode == 0 else ""
-        if not sql_text:
-            result = self.container.exec(
-                [
-                    "bash",
-                    "-lc",
-                    (
-                        "for path in "
-                        f"{self.directory_path}/{sqlfile} "
-                        f"{self.directory_path}/*/{sqlfile}; do "
-                        '[ -f "$path" ] && cat "$path"; '
-                        "done"
-                    ),
-                ],
-                check=False,
-            )
-            sql_text = result.stdout if result.returncode == 0 else ""
-        return parse_sqlfile_tables(sql_text)
+        self._require_workflow().import_metadata(source_schema, stage_schema, table)
 
     def inspect_dump(self) -> DumpManifest:
-        """Inspect the dump, auto-detecting format, and return a manifest.
-
-        When the dump is a legacy ``exp`` file, :attr:`dump_format` is set
-        to :attr:`~oracle_dmp_converter.models.DumpFormat.LEGACY` and ``imp``
-        is used for all subsequent operations.
-        """
-        schema_tables = self.discover_dump_tables()
+        """Inspect the dump, auto-detecting format, and return a manifest."""
+        self._workflow = create_workflow(self._workflow_config())
+        schema_tables = self._workflow.discover_tables()
 
         LOGGER.info("Discovered %d tables in dump", len(schema_tables))
         tables: list[TableMetadata] = []
@@ -320,8 +304,12 @@ class OracleDumpConverter:
         return DumpManifest(
             dump_paths=self.dumpfiles,
             tables=tuple(tables),
-            dump_format=self.dump_format,
+            dump_format=self._workflow.dump_format,
         )
+
+    # ------------------------------------------------------------------
+    # Convert
+    # ------------------------------------------------------------------
 
     def import_table_chunk(
         self,
@@ -335,37 +323,13 @@ class OracleDumpConverter:
         with self._connect() as conn:
             drop_table(conn, stage_schema, table)
 
-        if self.dump_format == DumpFormat.LEGACY:
-            # Legacy imp does not support QUERY= or partition-level imports.
-            # query / partition_name are silently ignored here; the planner
-            # must not produce HASH or PARTITION chunks for legacy dumps.
-            job = LegacyImportJob(
-                connection=self._legacy_connection(),
-                files=self._legacy_files(),
-                logfile=f"imp-{source_schema}-{table}-{chunk_name}.log"[:120],
-                fromuser=source_schema,
-                touser=stage_schema,
-                tables=(table,),
-                rows=True,
-                indexes=False,
-                grants=False,
-                constraints=False,
-            )
-            self._convert_runner.run_imp(job)
-        else:
-            job = ImportJob(
-                connection=DataPumpConnection(
-                    self.admin.user, self.admin.password, self.admin.service
-                ),
-                directory=self.directory,
-                dumpfiles=self.dumpfiles,
-                logfile=f"impdp-{source_schema}-{table}-{chunk_name}.log"[:120],
-                source_schema=source_schema,
-                table=table,
-                remap_schema=(source_schema, stage_schema),
-                partition_name=partition_name,
-            )
-            self._convert_runner.run_impdp(job)
+        self._require_workflow().import_chunk(
+            source_schema=source_schema,
+            stage_schema=stage_schema,
+            table=table,
+            chunk_name=chunk_name,
+            partition_name=partition_name,
+        )
 
         with self._connect() as conn:
             return count_rows(conn, stage_schema, table)
@@ -379,13 +343,13 @@ class OracleDumpConverter:
         output_dir: Path,
     ) -> ChunkConversionResult:
         stage_schema = self._stage_schema_for(source_schema)
-        table_dir = (
-            output_dir
-            / filesystem_safe_identifier(source_schema)
-            / filesystem_safe_identifier(table)
+        output_path = _chunk_output_path(
+            source_schema=source_schema,
+            table=table,
+            chunk_name=chunk_name,
+            output_dir=output_dir,
+            output_format=self.output_format,
         )
-        ext = self.output_format.value
-        output_path = table_dir / f"{filesystem_safe_identifier(chunk_name)}.{ext}"
         with self._connect() as conn:
             metadata = discover_table_metadata(conn, stage_schema, table)
             imported_rows = count_rows(conn, stage_schema, table)
@@ -409,11 +373,6 @@ class OracleDumpConverter:
             output_rows=export_result.rows,
             output_path=export_result.path,
         )
-
-    def drop_stage_table(self, source_schema: str, table: str) -> None:
-        stage_schema = self._stage_schema_for(source_schema)
-        with self._connect() as conn:
-            drop_table(conn, stage_schema, table)
 
     def convert_chunk_plan(
         self,
@@ -453,12 +412,12 @@ class OracleDumpConverter:
         for chunk in table_plan.chunks:
             state = state_store.get(table_plan.qualified_name, chunk.name) if state_store else None
             if state and state.status == "completed":
-                ext = self.output_format.value
-                output_path = (
-                    output_dir
-                    / filesystem_safe_identifier(table_plan.schema)
-                    / filesystem_safe_identifier(table_plan.table)
-                    / f"{filesystem_safe_identifier(chunk.name)}.{ext}"
+                output_path = _chunk_output_path(
+                    source_schema=table_plan.schema,
+                    table=table_plan.table,
+                    chunk_name=chunk.name,
+                    output_dir=output_dir,
+                    output_format=self.output_format,
                 )
                 chunk_results.append(
                     ChunkConversionResult(
@@ -513,6 +472,11 @@ class OracleDumpConverter:
         output_dir: Path,
         state_store: StateStore | None = None,
     ) -> PlanConversionResult:
+        # If we have no active workflow (convert-only run from a saved plan),
+        # initialise one from the plan's recorded format.
+        if self._workflow is None:
+            self.use_format(plan.dump_format)
+
         results: list[TableConversionResult] = []
         for table_plan in plan.tables:
             if table_plan.strategy == TableStrategy.UNSUPPORTED:

@@ -5,8 +5,8 @@ Two output formats are handled:
 1. **INDEXFILE output** – produced by ``imp INDEXFILE=/path/file.sql``.
    The file contains ``CREATE TABLE`` DDL, which may be schema-qualified
    (``"SCHEMA"."TABLE"``) when a full import is performed.  The regex is
-   intentionally identical to the one in ``sqlfile.py`` so that both
-   Data Pump and legacy paths share the same parser where possible.
+   shared with the modern Data Pump SQLFILE parser via
+   :mod:`oracle_dmp_converter.datapump._ddl_parser`.
 
 2. **SHOW=Y log output** – produced by running ``imp SHOW=Y``.  The log
    contains lines like::
@@ -24,22 +24,40 @@ from __future__ import annotations
 import logging
 import re
 
-from oracle_dmp_converter.oracle.metadata import ORACLE_MAINTAINED_SCHEMAS
+from oracle_dmp_converter.datapump._ddl_parser import (
+    CREATE_TABLE_QUOTED_RE,
+    unescape_quoted_identifier,
+)
+from oracle_dmp_converter.oracle.constants import ORACLE_MAINTAINED_SCHEMAS
 
 LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# INDEXFILE parser (primary)
+# Tablespace name parser
 # ---------------------------------------------------------------------------
 
-# Matches both quoted-and-schema-qualified and quoted-but-not-qualified forms:
-#   CREATE TABLE "SCHEMA"."TABLE" (...)
-#   CREATE TABLE "TABLE" (...)  <- no schema prefix
-_CREATE_TABLE_QUALIFIED_RE = re.compile(
-    r"\bCREATE\s+(?:GLOBAL\s+TEMPORARY\s+|PRIVATE\s+TEMPORARY\s+)?TABLE\s+"
-    r'"(?P<schema>(?:[^"]|"")+)"\."(?P<table>(?:[^"]|"")+)"',
-    re.IGNORECASE,
-)
+_TABLESPACE_NAME_RE = re.compile(r'\bTABLESPACE\s+"([^"]+)"', re.IGNORECASE)
+
+# Tablespaces that always exist in Oracle Free and never need pre-creation.
+_SYSTEM_TABLESPACES = frozenset({"SYSTEM", "SYSAUX", "USERS", "TEMP", "UNDOTBS1"})
+
+
+def parse_imp_indexfile_tablespaces(sql_text: str) -> frozenset[str]:
+    """Return non-system tablespace names referenced in ``imp INDEXFILE=`` DDL.
+
+    Used by the legacy import path to discover custom tablespaces that must be
+    pre-created in the staging Oracle instance before ``imp`` can land tables.
+    """
+    return frozenset(
+        m.group(1).upper()
+        for m in _TABLESPACE_NAME_RE.finditer(sql_text)
+        if m.group(1).upper() not in _SYSTEM_TABLESPACES
+    )
+
+
+# ---------------------------------------------------------------------------
+# INDEXFILE parser (primary)
+# ---------------------------------------------------------------------------
 
 # Also match unquoted schema.table in case the INDEXFILE omits quotes.
 _CREATE_TABLE_UNQUOTED_RE = re.compile(
@@ -66,10 +84,6 @@ _IMPORTING_TABLE_RE = re.compile(
 )
 
 
-def _unescape_quoted_identifier(value: str) -> str:
-    return value.replace('""', '"')
-
-
 def parse_imp_indexfile_tables(sql_text: str) -> tuple[tuple[str, str], ...]:
     """Return ``(schema, table)`` pairs from ``imp INDEXFILE=`` DDL output.
 
@@ -82,9 +96,9 @@ def parse_imp_indexfile_tables(sql_text: str) -> tuple[tuple[str, str], ...]:
     seen: set[tuple[str, str]] = set()
 
     # --- attempt 1: quoted "SCHEMA"."TABLE" (same format as Data Pump SQLFILE)
-    for match in _CREATE_TABLE_QUALIFIED_RE.finditer(sql_text):
-        schema = _unescape_quoted_identifier(match.group("schema"))
-        table = _unescape_quoted_identifier(match.group("table"))
+    for match in CREATE_TABLE_QUOTED_RE.finditer(sql_text):
+        schema = unescape_quoted_identifier(match.group("schema"))
+        table = unescape_quoted_identifier(match.group("table"))
         if schema.upper() in ORACLE_MAINTAINED_SCHEMAS:
             continue
         key = (schema, table)

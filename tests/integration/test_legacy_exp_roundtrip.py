@@ -24,16 +24,15 @@ import pytest
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
-from oracle_dmp_converter.datapump.legacy_parfile import (
-    LegacyConnection,
+from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyExportJob,
     render_legacy_export_parfile,
 )
-from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.docker_oracle import DockerOracle
 from oracle_dmp_converter.io.state import StateStore
 from oracle_dmp_converter.io.validation import count_parquet_rows
 from oracle_dmp_converter.models import ConversionPlan, DumpFormat, TableStrategy
-from oracle_dmp_converter.oracle.conn import drop_schema, oracle_connection
+from oracle_dmp_converter.oracle.conn import OracleCredentials, drop_schema, oracle_connection
 from oracle_dmp_converter.planner import plan_tables
 
 pytestmark = pytest.mark.integration
@@ -106,7 +105,7 @@ def _run_legacy_exp(
     log_path: str,
 ) -> None:
     """Export SRC schema using the legacy ``exp`` utility inside the container."""
-    conn = LegacyConnection(user="system", password=password, service=service)
+    conn = OracleCredentials(user="system", password=password, service=service)
     job = LegacyExportJob(
         connection=conn,
         files=(dump_path,),
@@ -136,8 +135,6 @@ def _run_legacy_exp(
 
 
 def test_legacy_exp_dump_to_parquet(tmp_path: Path) -> None:
-    if not docker_available():
-        pytest.skip("Docker is not available")
 
     image = os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE)
     password = "OraclePwd_123"
@@ -281,8 +278,6 @@ def test_prebuilt_legacy_sample_dump(tmp_path: Path) -> None:
     It does NOT re-run ``exp``; it just mounts the existing dump file and
     exercises the full detect → inspect → plan → convert pipeline.
     """
-    if not docker_available():
-        pytest.skip("Docker is not available")
     if not _SAMPLE_DUMP_FILE.exists():
         pytest.skip(
             f"Pre-built legacy sample dump not found at {_SAMPLE_DUMP_FILE}; "

@@ -11,16 +11,20 @@ from click.testing import CliRunner
 from oracle_dmp_converter.cli import main
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
 from oracle_dmp_converter.converter import OracleAdminConnection
-from oracle_dmp_converter.datapump.legacy_parfile import (
-    LegacyConnection,
+from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyExportJob,
     render_legacy_export_parfile,
 )
-from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ExportJob
-from oracle_dmp_converter.datapump.runner import DataPumpRunner
-from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.datapump.modern.parfile import ExportJob
+from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
+from oracle_dmp_converter.docker_oracle import DockerOracle
 from oracle_dmp_converter.io.validation import count_parquet_rows
-from oracle_dmp_converter.oracle.conn import create_directory, drop_schema, oracle_connection
+from oracle_dmp_converter.oracle.conn import (
+    OracleCredentials,
+    create_directory,
+    drop_schema,
+    oracle_connection,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -80,7 +84,7 @@ def _export_cli_dump(tmp_path: Path, image: str, password: str) -> Path:
             create_directory(conn, "CLI_DUMP", "/dumps")
         DataPumpRunner(container, tmp_path / "export-parfiles").run_expdp(
             ExportJob(
-                connection=DataPumpConnection("system", password, container.service),
+                connection=OracleCredentials("system", password, container.service),
                 directory="CLI_DUMP",
                 dumpfile=dumpfile,
                 logfile="cli_full_export.log",
@@ -119,7 +123,7 @@ def _export_cli_legacy_dump(tmp_path: Path, image: str, password: str) -> Path:
         )
         _setup_cli_source(admin)
 
-        conn_spec = LegacyConnection(user="system", password=password, service=container.service)
+        conn_spec = OracleCredentials(user="system", password=password, service=container.service)
         job = LegacyExportJob(
             connection=conn_spec,
             files=(f"/dumps/{dumpfile}",),
@@ -153,8 +157,6 @@ def _read_event_ids(parquet_files: list[Path]) -> set[int]:
 
 
 def test_cli_inspect_plan_convert_workflow(tmp_path: Path) -> None:
-    if not docker_available():
-        pytest.skip("Docker is not available")
 
     image = os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE)
     password = "OraclePwd_123"
@@ -223,8 +225,6 @@ def test_cli_inspect_plan_convert_workflow(tmp_path: Path) -> None:
 
 def test_cli_legacy_inspect_plan_convert_workflow(tmp_path: Path) -> None:
     """End-to-end CLI test using a legacy exp dump."""
-    if not docker_available():
-        pytest.skip("Docker is not available")
 
     image = os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE)
     password = "OraclePwd_123"

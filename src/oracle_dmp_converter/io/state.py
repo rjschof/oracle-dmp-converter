@@ -57,6 +57,12 @@ class StateStore:
     def close(self) -> None:
         self.conn.close()
 
+    def __enter__(self) -> StateStore:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
     def upsert(self, state: ChunkState) -> None:
         self.conn.execute(
             """

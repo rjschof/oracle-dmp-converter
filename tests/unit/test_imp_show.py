@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from oracle_dmp_converter.datapump.imp_show import _parse_show_output, parse_imp_indexfile_tables
+from oracle_dmp_converter.datapump.legacy.imp_show import (
+    _parse_show_output,
+    parse_imp_indexfile_tables,
+)
 
 # ---------------------------------------------------------------------------
 # Sample INDEXFILE output (as produced by imp FULL=Y INDEXFILE=...)

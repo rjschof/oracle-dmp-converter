@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+# Oracle ALL_TAB_COLUMNS embeds precision inside the type name, e.g.
+# "TIMESTAMP(6) WITH TIME ZONE" or "INTERVAL DAY(2) TO SECOND(6)".
+# Strip those so normalized lookups against STRINGIFIED_TYPES / TIMESTAMP_TYPES
+# work regardless of the declared precision.
+_PRECISION_RE = re.compile(r"\(\d+\)")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +46,7 @@ class ColumnMetadata:
 
     @property
     def normalized_type(self) -> str:
-        return self.data_type.upper()
+        return _PRECISION_RE.sub("", self.data_type.upper())
 
 
 @dataclass(frozen=True)

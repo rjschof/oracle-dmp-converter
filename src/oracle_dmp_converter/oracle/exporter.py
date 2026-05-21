@@ -16,7 +16,7 @@ from oracle_dmp_converter.config import ColumnOverride
 from oracle_dmp_converter.models import ColumnMetadata, OutputFormat
 from oracle_dmp_converter.oracle.format_writer import FormatWriter, make_writer
 from oracle_dmp_converter.oracle.identifiers import oracle_identifier, oracle_qualified_name
-from oracle_dmp_converter.oracle.types import export_expression, parquet_type_name
+from oracle_dmp_converter.oracle.types import export_expression, oracle_to_arrow_token
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def arrow_type_for_column(
     column: ColumnMetadata,
     override: ColumnOverride | None = None,
 ) -> pa.DataType:
-    type_name = parquet_type_name(column, override)
+    type_name = oracle_to_arrow_token(column, override)
     if type_name == "int64":
         return pa.int64()
     if type_name == "double":
@@ -151,31 +151,3 @@ def export_table(
     finally:
         writer.close()
     return ExportResult(path=output_path, rows=total_rows)
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compatibility shim
-# ---------------------------------------------------------------------------
-
-
-def export_table_to_parquet(
-    conn: oracledb.Connection,
-    *,
-    schema_name: str,
-    table_name: str,
-    columns: tuple[ColumnMetadata, ...],
-    output_path: Path,
-    column_overrides: dict[str, ColumnOverride] | None = None,
-    batch_size: int = 10_000,
-) -> ExportResult:
-    """Export to Parquet.  Prefer :func:`export_table` for new call sites."""
-    return export_table(
-        conn,
-        schema_name=schema_name,
-        table_name=table_name,
-        columns=columns,
-        output_path=output_path,
-        output_format=OutputFormat.PARQUET,
-        column_overrides=column_overrides,
-        batch_size=batch_size,
-    )

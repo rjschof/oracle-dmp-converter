@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from oracle_dmp_converter.datapump.legacy_parfile import (
-    LegacyConnection,
+from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyExportJob,
     LegacyImportJob,
     LegacyIndexFileJob,
@@ -11,10 +10,11 @@ from oracle_dmp_converter.datapump.legacy_parfile import (
     render_legacy_import_parfile,
     render_legacy_indexfile_parfile,
 )
+from oracle_dmp_converter.oracle.conn import OracleCredentials
 
 
-def _conn() -> LegacyConnection:
-    return LegacyConnection(user="system", password="OraclePwd_123", service="FREEPDB1")
+def _conn() -> OracleCredentials:
+    return OracleCredentials(user="system", password="OraclePwd_123", service="FREEPDB1")
 
 
 class TestLegacyConnection:

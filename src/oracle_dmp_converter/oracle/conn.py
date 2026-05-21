@@ -5,12 +5,30 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 import oracledb
 
 from oracle_dmp_converter.oracle.identifiers import oracle_identifier, oracle_qualified_name
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OracleCredentials:
+    """Connection credentials shared by all Oracle utilities (impdp, expdp, imp, exp).
+
+    The ``userid`` property produces the ``user/password@service`` connection
+    string accepted by both Data Pump and legacy exp/imp parameter files.
+    """
+
+    user: str
+    password: str
+    service: str = "FREEPDB1"
+
+    @property
+    def userid(self) -> str:
+        return f"{self.user}/{self.password}@{self.service}"
 
 
 @contextmanager
@@ -83,6 +101,33 @@ def count_rows(conn: oracledb.Connection, schema: str, table: str) -> int:
         cursor.execute(f"SELECT COUNT(*) FROM {oracle_qualified_name(schema, table)}")
         value = cursor.fetchone()[0]
     return int(value)
+
+
+def ensure_tablespace(
+    conn: oracledb.Connection,
+    tablespace: str,
+    *,
+    datafile_dir: str = "/opt/oracle/oradata/FREE/FREEPDB1",
+) -> None:
+    """Create *tablespace* if it does not already exist (ORA-01543 is ignored)."""
+    datafile = f"{datafile_dir}/{tablespace.lower()}01.dbf"
+    execute_ignore(
+        conn,
+        f"CREATE TABLESPACE {oracle_identifier(tablespace)}"
+        f" DATAFILE '{datafile}' SIZE 10M AUTOEXTEND ON NEXT 10M",
+        {1543},  # ORA-01543: tablespace already exists
+    )
+    conn.commit()
+
+
+def grant_quota_unlimited(conn: oracledb.Connection, schema: str, tablespace: str) -> None:
+    """Grant QUOTA UNLIMITED on *tablespace* to *schema*."""
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"ALTER USER {oracle_identifier(schema)}"
+            f" QUOTA UNLIMITED ON {oracle_identifier(tablespace)}"
+        )
+    conn.commit()
 
 
 def table_exists(conn: oracledb.Connection, schema: str, table: str) -> bool:

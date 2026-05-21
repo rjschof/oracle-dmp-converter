@@ -5,9 +5,8 @@ This script exercises a broad set of Oracle database features:
 
 - Custom tablespaces (COMBINED_DATA for tables, COMBINED_IDX for indexes)
 - Four schemas: HRDATA, INVENTORY, FINANCE, AUDITLOG
-- Column types: BINARY_FLOAT, BINARY_DOUBLE, TIMESTAMP WITH TIME ZONE,
-  TIMESTAMP WITH LOCAL TIME ZONE, INTERVAL YEAR TO MONTH,
-  INTERVAL DAY TO SECOND, NCLOB
+- Column types: TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH LOCAL TIME ZONE,
+  INTERVAL YEAR TO MONTH, INTERVAL DAY TO SECOND, NCLOB
 - All three partition types: LIST (INVENTORY.PRODUCTS),
   RANGE (FINANCE.TRANSACTIONS), HASH (AUDITLOG.CHANGE_LOG)
 - Intra- and cross-schema foreign keys and check constraints
@@ -47,15 +46,15 @@ import yaml
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
 from oracle_dmp_converter.converter import OracleAdminConnection
-from oracle_dmp_converter.datapump.legacy_parfile import (
-    LegacyConnection,
+from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyExportJob,
     render_legacy_export_parfile,
 )
-from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ExportJob
-from oracle_dmp_converter.datapump.runner import DataPumpRunner
+from oracle_dmp_converter.datapump.modern.parfile import ExportJob
+from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
 from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
 from oracle_dmp_converter.oracle.conn import (
+    OracleCredentials,
     create_directory,
     drop_schema,
     ensure_schema,
@@ -289,12 +288,12 @@ def create_tables(conn: oracledb.Connection) -> None:
             # ------------------------------------------------------------------
             """
             CREATE TABLE INVENTORY.PRODUCTS (
-                PRODUCT_ID   NUMBER(8)     NOT NULL,
-                PRODUCT_NAME VARCHAR2(80)  NOT NULL,
+                PRODUCT_ID   NUMBER(8)      NOT NULL,
+                PRODUCT_NAME VARCHAR2(80)   NOT NULL,
                 CATEGORY     VARCHAR2(30),
-                REGION       VARCHAR2(10)  NOT NULL,
-                UNIT_PRICE   BINARY_DOUBLE NOT NULL,
-                WEIGHT_KG    BINARY_FLOAT,
+                REGION       VARCHAR2(10)   NOT NULL,
+                UNIT_PRICE   NUMBER(12, 4)  NOT NULL,
+                WEIGHT_KG    NUMBER(8, 4),
                 ACTIVE_FLAG  CHAR(1),
                 CREATED_DATE DATE,
                 CONSTRAINT PRODUCTS_PK PRIMARY KEY (PRODUCT_ID)
@@ -1047,7 +1046,7 @@ def export_modern_dump(
         runner = DataPumpRunner(container, Path(tmp))
         runner.run_expdp(
             ExportJob(
-                connection=DataPumpConnection(admin.user, admin.password, admin.service),
+                connection=OracleCredentials(admin.user, admin.password, admin.service),
                 directory=DUMP_DIRECTORY,
                 dumpfile=MODERN_DUMPFILE,
                 logfile=MODERN_LOGFILE,
@@ -1080,7 +1079,7 @@ def export_legacy_dump(
     admin: OracleAdminConnection,
     output_dir: Path,
 ) -> None:
-    conn_spec = LegacyConnection(user=admin.user, password=admin.password, service=admin.service)
+    conn_spec = OracleCredentials(user=admin.user, password=admin.password, service=admin.service)
     job = LegacyExportJob(
         connection=conn_spec,
         files=(f"{CONTAINER_DUMP_PATH}/{LEGACY_DUMPFILE}",),
@@ -1171,7 +1170,7 @@ Two dump files produced from a single Oracle database instance.
 | HRDATA | JOBS | — | VARCHAR2 primary key |
 | HRDATA | EMPLOYEES | — | `INTERVAL YEAR TO MONTH`, `NCLOB`, check + FK constraints |
 | INVENTORY | WAREHOUSES | — | |
-| INVENTORY | PRODUCTS | **LIST** (REGION) | `BINARY_DOUBLE`, `BINARY_FLOAT` |
+| INVENTORY | PRODUCTS | **LIST** (REGION) | `NUMBER(12,4)` unit price, `NUMBER(8,4)` weight |
 | INVENTORY | STOCK_LEVELS | — | FK to PRODUCTS and WAREHOUSES |
 | FINANCE | ACCOUNTS | — | Cross-schema FK to HRDATA.EMPLOYEES |
 | FINANCE | TRANSACTIONS | **RANGE** (TXN_DATE, 5 parts) | `TIMESTAMP WITH TZ`, `INTERVAL DS` |

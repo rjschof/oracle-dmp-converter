@@ -1,29 +1,19 @@
-"""Data Pump parameter file rendering."""
+"""Data Pump parameter file rendering for modern expdp/impdp operations."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 
+from oracle_dmp_converter.oracle.conn import OracleCredentials
 from oracle_dmp_converter.oracle.identifiers import oracle_identifier
 
 LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class DataPumpConnection:
-    user: str
-    password: str
-    service: str = "FREEPDB1"
-
-    @property
-    def userid(self) -> str:
-        return f"{self.user}/{self.password}@{self.service}"
-
-
-@dataclass(frozen=True)
 class ExportJob:
-    connection: DataPumpConnection
+    connection: OracleCredentials
     directory: str
     dumpfile: str
     logfile: str
@@ -33,7 +23,7 @@ class ExportJob:
 
 @dataclass(frozen=True)
 class ImportJob:
-    connection: DataPumpConnection
+    connection: OracleCredentials
     directory: str
     dumpfiles: tuple[str, ...]
     logfile: str
@@ -44,7 +34,7 @@ class ImportJob:
     partition_name: str | None = None
     table_exists_action: str = "REPLACE"
     exclude: tuple[str, ...] = field(
-        default=("INDEX", "CONSTRAINT", "REF_CONSTRAINT", "TRIGGER", "STATISTICS")
+        default=("INDEX", "CONSTRAINT", "REF_CONSTRAINT", "TRIGGER", "STATISTICS", "GRANT")
     )
     transform: tuple[str, ...] = field(
         default=("DISABLE_ARCHIVE_LOGGING:Y", "SEGMENT_ATTRIBUTES:N")
@@ -53,7 +43,7 @@ class ImportJob:
 
 @dataclass(frozen=True)
 class SqlFileJob:
-    connection: DataPumpConnection
+    connection: OracleCredentials
     directory: str
     dumpfiles: tuple[str, ...]
     logfile: str

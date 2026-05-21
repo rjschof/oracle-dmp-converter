@@ -8,13 +8,18 @@ import pytest
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
-from oracle_dmp_converter.datapump.parfile import DataPumpConnection, ExportJob
-from oracle_dmp_converter.datapump.runner import DataPumpRunner
-from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
+from oracle_dmp_converter.datapump.modern.parfile import ExportJob
+from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
+from oracle_dmp_converter.docker_oracle import DockerOracle
 from oracle_dmp_converter.io.state import StateStore
 from oracle_dmp_converter.io.validation import count_parquet_rows
 from oracle_dmp_converter.models import ConversionPlan, TableStrategy
-from oracle_dmp_converter.oracle.conn import drop_schema, oracle_connection, table_exists
+from oracle_dmp_converter.oracle.conn import (
+    OracleCredentials,
+    drop_schema,
+    oracle_connection,
+    table_exists,
+)
 from oracle_dmp_converter.planner import plan_tables
 
 pytestmark = pytest.mark.integration
@@ -103,8 +108,6 @@ def _read_ids(parquet_files: list[Path]) -> set[int]:
 
 
 def test_full_expdp_dump_whole_and_partition(tmp_path: Path) -> None:
-    if not docker_available():
-        pytest.skip("Docker is not available")
 
     image = os.environ.get("DMP_TO_PARQUET_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE)
     password = "OraclePwd_123"
@@ -124,7 +127,7 @@ def test_full_expdp_dump_whole_and_partition(tmp_path: Path) -> None:
         datapump = DataPumpRunner(container, tmp_path / "parfiles")
         datapump.run_expdp(
             ExportJob(
-                connection=DataPumpConnection("system", password, container.service),
+                connection=OracleCredentials("system", password, container.service),
                 directory="DATA_PUMP_DIR",
                 dumpfile=dumpfile,
                 logfile="roundtrip_full_export.log",
