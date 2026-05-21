@@ -42,6 +42,20 @@ class LegacyDumpWorkflow(DumpWorkflow):
         inspect_runner: LegacyRunner,
         convert_runner: LegacyRunner,
     ) -> None:
+        """Store all configuration needed to drive legacy ``imp`` operations.
+
+        Args:
+            credentials: Oracle credentials written to the parfile ``USERID``
+                field for every ``imp`` invocation.
+            directory_path: Absolute OS path inside the container where the
+                dump files reside.
+            dumpfiles: Tuple of dump file base-names (without the directory
+                path prefix).
+            inspect_runner: :class:`LegacyRunner` used for read-only discovery
+                operations (``INDEXFILE=``).
+            convert_runner: :class:`LegacyRunner` used for data-importing
+                operations (row imports).
+        """
         self._credentials = credentials
         self._directory_path = directory_path.rstrip("/")
         self._dumpfiles = dumpfiles
@@ -74,14 +88,23 @@ class LegacyDumpWorkflow(DumpWorkflow):
             indexfile=_INDEXFILE_REMOTE,
             full=True,
         )
+        LOGGER.info(
+            "Running imp INDEXFILE discovery (files: %s, indexfile=%s)",
+            ", ".join(self._dumpfiles),
+            _INDEXFILE_REMOTE,
+        )
         sql_text = self._inspect_runner.run_imp_indexfile(job)
 
         if not sql_text:
+            LOGGER.debug(
+                "INDEXFILE not found at %s; trying dump directory fallback", _INDEXFILE_REMOTE
+            )
             alt = self._inspect_runner.container.exec(
                 ["cat", f"{self._directory_path}/{_INDEXFILE_NAME}"], check=False
             )
             sql_text = alt.stdout if alt.returncode == 0 else ""
 
+        LOGGER.info("imp INDEXFILE discovery complete (%d chars of DDL)", len(sql_text))
         self._cached_sql = sql_text
         return self._cached_sql
 
@@ -107,6 +130,9 @@ class LegacyDumpWorkflow(DumpWorkflow):
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import table DDL only (``rows=False``) into the staging schema."""
+        LOGGER.debug(
+            "Importing legacy metadata for %s.%s -> %s", source_schema, table, stage_schema
+        )
         job = LegacyImportJob(
             connection=self._credentials,
             files=self._legacy_files(),
@@ -136,6 +162,10 @@ class LegacyDumpWorkflow(DumpWorkflow):
         is always imported.  The planner must not produce ``HASH`` or
         ``PARTITION`` chunks for legacy dumps.
         """
+        LOGGER.debug(
+            "Importing legacy chunk %s for %s.%s -> %s",
+            chunk_name, source_schema, table, stage_schema,
+        )
         job = LegacyImportJob(
             connection=self._credentials,
             files=self._legacy_files(),

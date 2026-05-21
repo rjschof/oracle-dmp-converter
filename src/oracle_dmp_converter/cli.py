@@ -8,7 +8,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import click
-from rich.console import Console
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE, ConverterConfig, load_config
 from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
@@ -25,12 +24,17 @@ from oracle_dmp_converter.planner import plan_tables
 
 LOGGER = logging.getLogger(__name__)
 
-console = Console()
 DEFAULT_DUMP_DIRECTORY = "ORACLE_DMC_DUMP"
 DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
 
 
 def _default_runtime() -> str:
+    """Return the container runtime to use, respecting the environment override.
+
+    Returns:
+        The value of ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` if set,
+        otherwise the compiled-in :data:`DEFAULT_CONTAINER_RUNTIME`.
+    """
     return os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME)
 
 
@@ -55,22 +59,52 @@ def doctor(container_runtime: str) -> None:
     """Check local runtime prerequisites."""
 
     if docker_available(container_runtime):
-        console.print(f"[green]{container_runtime} is available[/green]")
+        LOGGER.info("%s is available", container_runtime)
     else:
         raise click.ClickException(f"{container_runtime} is not available")
-    console.print("[green]Python dependencies are importable[/green]")
+    LOGGER.info("Python dependencies are importable")
 
 
 def _dump_paths_or_plan_dump_paths(
     dump_paths: tuple[Path, ...],
     plan_dump_paths: tuple[str, ...] = (),
 ) -> tuple[Path, ...]:
+    """Resolve the effective set of dump file paths.
+
+    If the caller supplied explicit ``--dump`` paths, those are returned
+    (resolved to absolute form).  Otherwise the paths embedded in a previously
+    loaded plan are converted from strings and resolved.
+
+    Args:
+        dump_paths: CLI-supplied dump paths, which take priority.
+        plan_dump_paths: Fallback dump paths read from a serialised
+            :class:`~oracle_dmp_converter.models.ConversionPlan`.
+
+    Returns:
+        Tuple of resolved absolute :class:`~pathlib.Path` instances.
+    """
     if dump_paths:
         return tuple(path.resolve() for path in dump_paths)
     return tuple(Path(path).resolve() for path in plan_dump_paths)
 
 
 def _validate_dump_paths(dump_paths: tuple[Path, ...]) -> tuple[Path, tuple[str, ...]]:
+    """Validate that dump paths are non-empty and all reside in one directory.
+
+    Oracle Data Pump mounts a single host directory into the container, so all
+    ``.dmp`` files must share the same parent directory.
+
+    Args:
+        dump_paths: Resolved absolute paths to the ``.dmp`` files.
+
+    Returns:
+        A two-tuple of ``(dump_dir, filenames)`` where *dump_dir* is the
+        common parent directory and *filenames* is a tuple of bare file names.
+
+    Raises:
+        click.ClickException: If *dump_paths* is empty or the files span more
+            than one directory.
+    """
     if not dump_paths:
         raise click.ClickException("At least one --dump is required")
     dump_dirs = {path.parent.resolve() for path in dump_paths}
@@ -81,6 +115,19 @@ def _validate_dump_paths(dump_paths: tuple[Path, ...]) -> tuple[Path, tuple[str,
 
 
 def _admin_for_container(container: DockerOracle, password: str) -> OracleAdminConnection:
+    """Build an :class:`~oracle_dmp_converter.converter.OracleAdminConnection` for a container.
+
+    Uses the container's mapped host port and the ``system`` user to create
+    the administrative connection descriptor used by the converter.
+
+    Args:
+        container: Running :class:`~oracle_dmp_converter.docker_oracle.DockerOracle` instance.
+        password: Oracle ``system`` user password.
+
+    Returns:
+        An :class:`~oracle_dmp_converter.converter.OracleAdminConnection` for
+        the running container.
+    """
     return OracleAdminConnection(
         host="localhost",
         port=container.mapped_port(),
@@ -91,6 +138,14 @@ def _admin_for_container(container: DockerOracle, password: str) -> OracleAdminC
 
 
 def _create_dump_directory(admin: OracleAdminConnection) -> None:
+    """Create the Oracle DIRECTORY object that maps to the container dump path.
+
+    Connects as the admin user and issues a ``CREATE OR REPLACE DIRECTORY``
+    statement pointing at :data:`DEFAULT_CONTAINER_DUMP_PATH`.
+
+    Args:
+        admin: Administrative connection descriptor for the running container.
+    """
     with oracle_connection(
         host=admin.host,
         port=admin.port,
@@ -110,6 +165,25 @@ def _build_converter(
     output_format: OutputFormat = OutputFormat.PARQUET,
     config: ConverterConfig | None = None,
 ) -> OracleDumpConverter:
+    """Construct an :class:`~oracle_dmp_converter.converter.OracleDumpConverter`.
+
+    Wires together the container, admin credentials, working directory, and
+    dump filenames into a converter instance ready for inspection or conversion.
+
+    Args:
+        container: Running Oracle Free Docker container.
+        admin: Administrative connection descriptor.
+        work_dir: Host-side directory for intermediate artefacts.
+        dumpfiles: Bare filenames of the ``.dmp`` files inside the container
+            dump directory.
+        output_format: Target output format for converted data.
+        config: Optional :class:`~oracle_dmp_converter.config.ConverterConfig`
+            with per-table and per-column overrides.
+
+    Returns:
+        A configured :class:`~oracle_dmp_converter.converter.OracleDumpConverter`
+        instance.
+    """
     return OracleDumpConverter(
         container=container,
         admin=admin,
@@ -166,15 +240,22 @@ def inspect(
     """Inspect a full Data Pump dump and write a manifest."""
 
     dump_dir, dumpfiles = _validate_dump_paths(dump_paths)
+    LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", oracle_image, dump_dir)
     with DockerOracle.start(
         image=oracle_image,
         password=oracle_password,
         mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
         runtime=container_runtime,
     ) as container:
-        console.print(f"Started Oracle container [bold]{container.name}[/bold]")
+        LOGGER.info("Oracle container %s started; waiting for readiness", container.name)
         container.wait_ready()
+        LOGGER.info("Oracle container %s is ready", container.name)
         admin = _admin_for_container(container, oracle_password)
+        LOGGER.info(
+            "Creating dump directory object %s -> %s",
+            DEFAULT_DUMP_DIRECTORY,
+            DEFAULT_CONTAINER_DUMP_PATH,
+        )
         _create_dump_directory(admin)
         converter = _build_converter(
             container=container,
@@ -182,6 +263,7 @@ def inspect(
             work_dir=work_dir,
             dumpfiles=dumpfiles,
         )
+        LOGGER.info("Inspecting dump: %s", ", ".join(dumpfiles))
         manifest = converter.inspect_dump()
         manifest = replace(
             manifest,
@@ -190,7 +272,7 @@ def inspect(
         if manifest_path is None:
             manifest_path = work_dir / "manifest.json"
         save_manifest(manifest_path, manifest)
-        console.print(f"[green]Wrote manifest with {len(manifest.tables)} tables[/green]")
+        LOGGER.info("Wrote manifest with %d tables: %s", len(manifest.tables), manifest_path)
 
 
 @main.command("plan")
@@ -205,18 +287,23 @@ def inspect(
     "--output",
     "plan_path",
     type=click.Path(path_type=Path),
-    default=Path("work/plan.yaml"),
-    show_default=True,
+    default=None,
+    show_default="<manifest-dir>/plan.yaml",
 )
 def plan_command(
     manifest_path: Path,
     config_path: Path | None,
-    plan_path: Path,
+    plan_path: Path | None,
 ) -> None:
     """Build a conversion plan from an inspection manifest."""
 
+    if plan_path is None:
+        plan_path = manifest_path.parent / "plan.yaml"
+
+    LOGGER.info("Loading manifest from %s", manifest_path)
     manifest = load_manifest(manifest_path)
     config = load_config(config_path)
+    LOGGER.info("Planning %d tables (format=%s)", len(manifest.tables), manifest.dump_format.value)
     table_plans = plan_tables(manifest.tables, config, dump_format=manifest.dump_format)
     plan = ConversionPlan(
         dump_paths=manifest.dump_paths,
@@ -226,8 +313,11 @@ def plan_command(
     )
     save_plan(plan_path, plan)
     unsupported = [table for table in table_plans if table.reason]
-    console.print(
-        f"[green]Wrote plan for {len(table_plans)} tables ({len(unsupported)} unsupported)[/green]"
+    LOGGER.info(
+        "Wrote plan for %d tables (%d unsupported): %s",
+        len(table_plans),
+        len(unsupported),
+        plan_path,
     )
 
 
@@ -252,8 +342,8 @@ def plan_command(
 @click.option(
     "--work-dir",
     type=click.Path(path_type=Path),
-    default=Path("work"),
-    show_default=True,
+    default=None,
+    show_default="<plan-dir> if --plan given, else work/",
 )
 @click.option(
     "--oracle-image",
@@ -273,7 +363,7 @@ def convert(
     config_path: Path | None,
     output_dir: Path,
     output_format: str,
-    work_dir: Path,
+    work_dir: Path | None,
     oracle_image: str,
     oracle_password: str,
     container_runtime: str,
@@ -282,6 +372,9 @@ def convert(
 
     fmt = OutputFormat(output_format.lower())
     config = load_config(config_path)
+
+    if work_dir is None:
+        work_dir = plan_path.parent if plan_path else Path("work")
 
     if plan_path:
         plan = load_plan(plan_path)
@@ -294,15 +387,22 @@ def convert(
     dump_dir, dumpfiles = _validate_dump_paths(resolved_dump_paths)
     image = plan.oracle_image if plan else oracle_image
 
+    LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", image, dump_dir)
     with DockerOracle.start(
         image=image,
         password=oracle_password,
         mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
         runtime=container_runtime,
     ) as container:
-        console.print(f"Started Oracle container [bold]{container.name}[/bold]")
+        LOGGER.info("Oracle container %s started; waiting for readiness", container.name)
         container.wait_ready()
+        LOGGER.info("Oracle container %s is ready", container.name)
         admin = _admin_for_container(container, oracle_password)
+        LOGGER.info(
+            "Creating dump directory object %s -> %s",
+            DEFAULT_DUMP_DIRECTORY,
+            DEFAULT_CONTAINER_DUMP_PATH,
+        )
         _create_dump_directory(admin)
         converter = _build_converter(
             container=container,
@@ -313,6 +413,7 @@ def convert(
             config=config,
         )
         if plan is None:
+            LOGGER.info("No plan provided; running inspect + plan inline")
             manifest = converter.inspect_dump()
             plan = ConversionPlan(
                 dump_paths=tuple(str(path) for path in resolved_dump_paths),
@@ -322,6 +423,11 @@ def convert(
             )
             save_manifest(work_dir / "manifest.json", manifest)
             save_plan(work_dir / "plan.yaml", plan)
+            LOGGER.info(
+                "Inline inspect+plan complete: %d tables, manifest and plan written to %s",
+                len(manifest.tables),
+                work_dir,
+            )
         else:
             converter.use_format(plan.dump_format)
         state_store = StateStore(work_dir / "convert" / "state.sqlite")
@@ -329,6 +435,9 @@ def convert(
             result = converter.convert_plan(plan, output_dir, state_store)
         finally:
             state_store.close()
-        console.print(
-            f"[green]Converted {result.rows} rows across {len(result.tables)} tables[/green]"
+        LOGGER.info(
+            "Conversion complete: %d rows across %d tables -> %s",
+            result.rows,
+            len(result.tables),
+            output_dir,
         )

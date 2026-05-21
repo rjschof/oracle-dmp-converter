@@ -49,6 +49,17 @@ class ParquetFormatWriter(FormatWriter):
     """Stream rows to a Parquet file via :class:`pyarrow.parquet.ParquetWriter`."""
 
     def __init__(self, path: Path, schema: pa.Schema) -> None:
+        """Initialise the writer without opening the file yet.
+
+        The underlying :class:`~pyarrow.parquet.ParquetWriter` is created
+        lazily on the first call to :meth:`write_batch` so that an empty file
+        can be produced via :meth:`write_empty` without writing a partial
+        Parquet header.
+
+        Args:
+            path: Destination file path.
+            schema: Arrow schema for the output file.
+        """
         self._path = path
         self._schema = schema
         self._writer: pq.ParquetWriter | None = None
@@ -174,6 +185,21 @@ class AvroFormatWriter(FormatWriter):
     """
 
     def __init__(self, path: Path, schema: pa.Schema) -> None:
+        """Initialise the writer and pre-parse the Avro schema.
+
+        The Avro container file is not created until the first call to
+        :meth:`write_batch` (or :meth:`write_empty`) so that the file is
+        only created when there is something to write.
+
+        The record name in the Avro schema is derived from the output file
+        stem (hyphens replaced with underscores to satisfy the Avro name
+        grammar).
+
+        Args:
+            path: Destination ``.avro`` file path.
+            schema: Arrow schema; all fields are emitted as nullable unions
+                in the resulting Avro schema.
+        """
         self._path = path
         self._arrow_schema = schema
         self._avro_schema = fastavro.parse_schema(
@@ -212,6 +238,16 @@ class CsvFormatWriter(FormatWriter):
     """
 
     def __init__(self, path: Path, schema: pa.Schema) -> None:
+        """Initialise the writer without opening the file yet.
+
+        The output file is opened lazily on the first call to
+        :meth:`write_batch` so that header-only files can be written via
+        :meth:`write_empty` using a separate code path.
+
+        Args:
+            path: Destination ``.csv`` file path.
+            schema: Arrow schema (used only for :meth:`write_empty`).
+        """
         self._path = path
         self._schema = schema
         self._file: Any | None = None
@@ -254,7 +290,22 @@ _WRITERS: dict[OutputFormat, type[FormatWriter]] = {
 
 
 def make_writer(output_format: OutputFormat, path: Path, schema: pa.Schema) -> FormatWriter:
-    """Return a :class:`FormatWriter` for *output_format*."""
+    """Instantiate the :class:`FormatWriter` for the requested *output_format*.
+
+    Args:
+        output_format: One of :attr:`~oracle_dmp_converter.models.OutputFormat.PARQUET`,
+            :attr:`~oracle_dmp_converter.models.OutputFormat.AVRO`, or
+            :attr:`~oracle_dmp_converter.models.OutputFormat.CSV`.
+        path: Destination file path.
+        schema: Arrow schema describing the output columns.
+
+    Returns:
+        A concrete :class:`FormatWriter` ready to receive :meth:`~FormatWriter.write_batch`
+        calls.
+
+    Raises:
+        ValueError: If *output_format* is not a recognised format.
+    """
     try:
         writer_cls = _WRITERS[OutputFormat(output_format)]
     except (KeyError, ValueError) as exc:

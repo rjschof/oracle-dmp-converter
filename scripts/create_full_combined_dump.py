@@ -676,7 +676,7 @@ def insert_hr_data(conn: oracledb.Connection) -> None:
         status = status_cycle[(idx - 1) % len(status_cycle)]
         salary = round(50000.0 + (idx * 2500) % 100000, 2)
         commission = round(0.05 + (idx % 10) * 0.01, 2) if idx % 3 == 0 else None
-        tenure_mo = 12 + ((idx - 1) * 4) % 84  # 12–95 months
+        tenure_mo = 12 + ((idx - 1) * 4) % 84  # 12-95 months
         dept_name = ["Engineering", "Sales", "Finance", "Operations", "HR"][(idx - 1) % 5]
         bio = (f"Employee {idx} works in {dept_name}. " * 3).strip()
         hire_offset = (idx * 11) % 365 + 1
@@ -856,7 +856,7 @@ def insert_finance_data(conn: oracledb.Connection) -> None:
         days_offset = (idx - 1) * 4
         hours_offset = days_offset * 24 + idx % 24
         amount = round(10.0 + (idx * 37.41) % 2000.0, 2)
-        duration_secs = 30 + (idx * 7) % 300  # 30–329 seconds of "processing time"
+        duration_secs = 30 + (idx * 7) % 300  # 30-329 seconds of "processing time"
         txn_type = txn_types[(idx - 1) % len(txn_types)]
         status = txn_status[(idx - 1) % len(txn_status)]
         reference = f"REF-{idx:06d}-{txn_type[:3]}"
@@ -912,7 +912,7 @@ def insert_audit_data(conn: oracledb.Connection) -> None:
 
     log_rows = []
     for idx in range(1, 51):
-        user_id = ((idx - 1) % 30) + 1  # cycles through employee IDs 1–30
+        user_id = ((idx - 1) % 30) + 1  # cycles through employee IDs 1-30
         schema_name = schema_names[(idx - 1) % len(schema_names)]
         table_name = table_names[(idx - 1) % len(table_names)]
         action = actions[(idx - 1) % len(actions)]

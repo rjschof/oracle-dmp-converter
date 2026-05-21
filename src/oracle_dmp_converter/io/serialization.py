@@ -25,6 +25,14 @@ LOGGER = logging.getLogger(__name__)
 
 
 def column_to_dict(column: ColumnMetadata) -> dict[str, Any]:
+    """Serialise a :class:`~oracle_dmp_converter.models.ColumnMetadata` to a plain dict.
+
+    Args:
+        column: Column metadata to serialise.
+
+    Returns:
+        Dictionary suitable for JSON serialisation.
+    """
     return {
         "name": column.name,
         "data_type": column.data_type,
@@ -37,6 +45,14 @@ def column_to_dict(column: ColumnMetadata) -> dict[str, Any]:
 
 
 def column_from_dict(data: dict[str, Any]) -> ColumnMetadata:
+    """Deserialise a :class:`~oracle_dmp_converter.models.ColumnMetadata` from a plain dict.
+
+    Args:
+        data: Dictionary as produced by :func:`column_to_dict`.
+
+    Returns:
+        Reconstructed :class:`~oracle_dmp_converter.models.ColumnMetadata`.
+    """
     return ColumnMetadata(
         name=str(data["name"]),
         data_type=str(data["data_type"]),
@@ -49,14 +65,39 @@ def column_from_dict(data: dict[str, Any]) -> ColumnMetadata:
 
 
 def partition_to_dict(partition: PartitionMetadata) -> dict[str, Any]:
+    """Serialise a :class:`~oracle_dmp_converter.models.PartitionMetadata` to a plain dict.
+
+    Args:
+        partition: Partition metadata to serialise.
+
+    Returns:
+        Dictionary with ``"name"`` and ``"position"`` keys.
+    """
     return {"name": partition.name, "position": partition.position}
 
 
 def partition_from_dict(data: dict[str, Any]) -> PartitionMetadata:
+    """Deserialise a :class:`~oracle_dmp_converter.models.PartitionMetadata` from a plain dict.
+
+    Args:
+        data: Dictionary as produced by :func:`partition_to_dict`.
+
+    Returns:
+        Reconstructed :class:`~oracle_dmp_converter.models.PartitionMetadata`.
+    """
     return PartitionMetadata(name=str(data["name"]), position=int(data["position"]))
 
 
 def table_metadata_to_dict(table: TableMetadata) -> dict[str, Any]:
+    """Serialise a :class:`~oracle_dmp_converter.models.TableMetadata` to a plain dict.
+
+    Args:
+        table: Table metadata to serialise.
+
+    Returns:
+        Dictionary containing all fields, with nested column and partition
+        dicts.
+    """
     return {
         "schema": table.schema,
         "name": table.name,
@@ -70,6 +111,14 @@ def table_metadata_to_dict(table: TableMetadata) -> dict[str, Any]:
 
 
 def table_metadata_from_dict(data: dict[str, Any]) -> TableMetadata:
+    """Deserialise a :class:`~oracle_dmp_converter.models.TableMetadata` from a plain dict.
+
+    Args:
+        data: Dictionary as produced by :func:`table_metadata_to_dict`.
+
+    Returns:
+        Reconstructed :class:`~oracle_dmp_converter.models.TableMetadata`.
+    """
     return TableMetadata(
         schema=str(data["schema"]),
         name=str(data["name"]),
@@ -85,6 +134,15 @@ def table_metadata_from_dict(data: dict[str, Any]) -> TableMetadata:
 
 
 def chunk_plan_to_dict(chunk: ChunkPlan) -> dict[str, Any]:
+    """Serialise a :class:`~oracle_dmp_converter.models.ChunkPlan` to a plain dict.
+
+    Args:
+        chunk: Chunk plan to serialise.
+
+    Returns:
+        Dictionary with ``"name"``, ``"strategy"``, and ``"partition_name"``
+        keys.
+    """
     return {
         "name": chunk.name,
         "strategy": chunk.strategy.value,
@@ -93,6 +151,14 @@ def chunk_plan_to_dict(chunk: ChunkPlan) -> dict[str, Any]:
 
 
 def chunk_plan_from_dict(data: dict[str, Any]) -> ChunkPlan:
+    """Deserialise a :class:`~oracle_dmp_converter.models.ChunkPlan` from a plain dict.
+
+    Args:
+        data: Dictionary as produced by :func:`chunk_plan_to_dict`.
+
+    Returns:
+        Reconstructed :class:`~oracle_dmp_converter.models.ChunkPlan`.
+    """
     return ChunkPlan(
         name=str(data["name"]),
         strategy=TableStrategy(str(data["strategy"])),
@@ -101,6 +167,15 @@ def chunk_plan_from_dict(data: dict[str, Any]) -> ChunkPlan:
 
 
 def table_plan_to_dict(plan: TablePlan) -> dict[str, Any]:
+    """Serialise a :class:`~oracle_dmp_converter.models.TablePlan` to a plain dict.
+
+    Args:
+        plan: Table plan to serialise.
+
+    Returns:
+        Dictionary with strategy, chunk list, optional reason, warnings, and
+        extra fields.
+    """
     return {
         "schema": plan.schema,
         "table": plan.table,
@@ -113,6 +188,14 @@ def table_plan_to_dict(plan: TablePlan) -> dict[str, Any]:
 
 
 def table_plan_from_dict(data: dict[str, Any]) -> TablePlan:
+    """Deserialise a :class:`~oracle_dmp_converter.models.TablePlan` from a plain dict.
+
+    Args:
+        data: Dictionary as produced by :func:`table_plan_to_dict`.
+
+    Returns:
+        Reconstructed :class:`~oracle_dmp_converter.models.TablePlan`.
+    """
     return TablePlan(
         schema=str(data["schema"]),
         table=str(data["table"]),
@@ -125,6 +208,14 @@ def table_plan_from_dict(data: dict[str, Any]) -> TablePlan:
 
 
 def save_manifest(path: Path, manifest: DumpManifest) -> None:
+    """Write a :class:`~oracle_dmp_converter.models.DumpManifest` to a JSON file.
+
+    Creates parent directories as needed.
+
+    Args:
+        path: Destination file path.
+        manifest: Manifest to serialise.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": manifest.version,
@@ -136,6 +227,14 @@ def save_manifest(path: Path, manifest: DumpManifest) -> None:
 
 
 def load_manifest(path: Path) -> DumpManifest:
+    """Load a :class:`~oracle_dmp_converter.models.DumpManifest` from a JSON file.
+
+    Args:
+        path: Path to the ``manifest.json`` file.
+
+    Returns:
+        Deserialised :class:`~oracle_dmp_converter.models.DumpManifest`.
+    """
     data = json.loads(path.read_text())
     raw_format = data.get("dump_format", DumpFormat.DATAPUMP.value)
     return DumpManifest(
@@ -147,6 +246,14 @@ def load_manifest(path: Path) -> DumpManifest:
 
 
 def save_plan(path: Path, plan: ConversionPlan) -> None:
+    """Write a :class:`~oracle_dmp_converter.models.ConversionPlan` to a YAML file.
+
+    Creates parent directories as needed.
+
+    Args:
+        path: Destination file path (conventionally ``plan.yaml``).
+        plan: Conversion plan to serialise.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": plan.version,
@@ -159,6 +266,14 @@ def save_plan(path: Path, plan: ConversionPlan) -> None:
 
 
 def load_plan(path: Path) -> ConversionPlan:
+    """Load a :class:`~oracle_dmp_converter.models.ConversionPlan` from a YAML file.
+
+    Args:
+        path: Path to the ``plan.yaml`` file.
+
+    Returns:
+        Deserialised :class:`~oracle_dmp_converter.models.ConversionPlan`.
+    """
     data = yaml.safe_load(path.read_text()) or {}
     raw_format = data.get("dump_format", DumpFormat.DATAPUMP.value)
     return ConversionPlan(

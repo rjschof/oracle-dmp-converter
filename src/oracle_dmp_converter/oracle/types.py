@@ -27,6 +27,32 @@ STRINGIFIED_TYPES = {
 
 
 def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
+    """Return the Arrow type token string for an Oracle column.
+
+    The token is a short string used by
+    :func:`~oracle_dmp_converter.oracle.exporter.arrow_type_for_column` to
+    construct a concrete :class:`~pyarrow.DataType`.  Recognised tokens:
+
+    * ``"int64"`` — 64-bit integer.
+    * ``"double"`` — 64-bit floating point.
+    * ``"string"`` — UTF-8 string.
+    * ``"binary"`` — raw bytes.
+    * ``"timestamp_us"`` — microsecond-resolution timestamp.
+    * ``"decimal128(p,s)"`` — fixed-precision decimal with precision *p* and
+      scale *s*.
+
+    If *override* supplies a ``parquet_type``, it is returned verbatim so the
+    caller can inject custom type mappings.
+
+    Args:
+        column: Column metadata from ``ALL_TAB_COLUMNS``.
+        override: Optional per-column override; ``parquet_type`` takes
+            unconditional priority when set.
+
+    Returns:
+        A type token string as described above.  Unknown Oracle types default
+        to ``"string"`` with a warning log entry.
+    """
     if override and override.parquet_type:
         return override.parquet_type
     data_type = column.normalized_type
@@ -57,6 +83,25 @@ def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | Non
 
 
 def export_expression(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
+    """Return the SQL expression used to SELECT *column* during export.
+
+    For most columns this is just the quoted column identifier.  Exceptions:
+
+    * If *override* provides an ``expression`` template, the ``{column}``
+      placeholder is replaced with the quoted identifier and the result is
+      returned — enabling user-defined transforms (e.g. geometry conversion).
+    * Columns whose normalised type is in :data:`STRINGIFIED_TYPES` are
+      wrapped in ``TO_CHAR(...)`` to produce a string representation that
+      PyArrow can accept.
+
+    Args:
+        column: Column metadata describing the Oracle data type.
+        override: Optional per-column override; ``expression`` takes
+            unconditional priority when set.
+
+    Returns:
+        A SQL fragment suitable for inclusion in a ``SELECT`` list.
+    """
     column_ref = oracle_identifier(column.name)
     if override and override.expression:
         return override.expression.replace("{column}", column_ref)

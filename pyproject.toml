@@ -12,7 +12,6 @@ dependencies = [
     "oracledb>=2.5.1",
     "pyarrow>=18.1.0",
     "pyyaml>=6.0.2",
-    "rich>=13.9.4",
 ]
 
 [project.scripts]
@@ -32,6 +31,7 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--import-mode=importlib"
 markers = [
     "integration: tests that require Docker and Oracle Free",
 ]

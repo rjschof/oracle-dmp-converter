@@ -14,7 +14,7 @@ different parameter format.  Key differences from Data Pump parfiles:
 * There is no ``QUERY=`` support, so hash/partition chunking is not
   available.
 * The ``INDEXFILE=`` parameter writes CREATE TABLE / CREATE INDEX DDL
-  to a file without executing any import – the equivalent of Data
+  to a file without executing any import - the equivalent of Data
   Pump's ``SQLFILE=``.
 """
 
@@ -88,7 +88,7 @@ class LegacyIndexFileJob:
     # Absolute path inside the container where DDL will be written.
     indexfile: str
     full: bool = True
-    # Optional owner filter – limits discovery to specific schemas.
+    # Optional owner filter - limits discovery to specific schemas.
     owner: tuple[str, ...] = field(default_factory=tuple)
 
 

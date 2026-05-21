@@ -18,6 +18,20 @@ def _estimated_segment_bytes(
     schema: str,
     table: str,
 ) -> int | None:
+    """Query ``ALL_SEGMENTS`` for the total allocated bytes of *table*.
+
+    Returns ``None`` when the dictionary view is unavailable (``ORA-00942``),
+    which can happen in restricted staging schemas.  Any other database error
+    is re-raised.
+
+    Args:
+        cursor: Open Oracle cursor from an active connection.
+        schema: Table owner.
+        table: Table name.
+
+    Returns:
+        Total allocated segment bytes, or ``None`` if unavailable.
+    """
     try:
         cursor.execute(
             """
@@ -36,6 +50,27 @@ def _estimated_segment_bytes(
 
 
 def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) -> TableMetadata:
+    """Collect full structural metadata for *schema*.*table* from Oracle catalogs.
+
+    Queries the following dictionary views in a single cursor session:
+
+    * ``ALL_TAB_COLUMNS`` — column names, types, precision/scale, nullability.
+    * ``ALL_SEGMENTS`` — estimated table size in bytes.
+    * ``ALL_TABLES`` — statistics-based row count and average row length.
+    * ``ALL_TAB_PARTITIONS`` — partition names and positions.
+    * ``ALL_CONSTRAINTS`` + ``ALL_CONS_COLUMNS`` — primary key columns.
+    * ``ALL_CONSTRAINTS`` + ``ALL_CONS_COLUMNS`` — unique key columns.
+
+    Args:
+        conn: Active Oracle connection with ``SELECT`` privilege on the
+            ``ALL_*`` dictionary views.
+        schema: Table owner (exact case, as stored in the dictionary).
+        table: Table name (exact case, as stored in the dictionary).
+
+    Returns:
+        A fully populated :class:`~oracle_dmp_converter.models.TableMetadata`
+        instance.
+    """
     with conn.cursor() as cursor:
         cursor.execute(
             """

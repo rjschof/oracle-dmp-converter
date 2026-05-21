@@ -28,6 +28,21 @@ class DataPumpWorkflow(DumpWorkflow):
         inspect_runner: DataPumpRunner,
         convert_runner: DataPumpRunner,
     ) -> None:
+        """Store all configuration needed to drive modern Data Pump operations.
+
+        Args:
+            credentials: Oracle credentials written to the parfile ``USERID``
+                field for every ``impdp`` invocation.
+            directory: Oracle DIRECTORY object name (e.g. ``"DUMP_DIR"``).
+            directory_path: Absolute OS path inside the container that
+                *directory* maps to; used when reading files produced by
+                ``impdp SQLFILE=``.
+            dumpfiles: Tuple of dump file base-names (without directory path).
+            inspect_runner: :class:`DataPumpRunner` used for read-only
+                discovery operations (``SQLFILE=``, ``CONTENT=METADATA_ONLY``).
+            convert_runner: :class:`DataPumpRunner` used for data-importing
+                operations.
+        """
         self._credentials = credentials
         self._directory = directory
         self._directory_path = directory_path.rstrip("/")
@@ -57,6 +72,7 @@ class DataPumpWorkflow(DumpWorkflow):
             logfile="dmp2parquet-discovery.log",
             sqlfile=sqlfile,
         )
+        LOGGER.info("Running impdp SQLFILE discovery (sqlfile=%s)", sqlfile)
         self._inspect_runner.run_sqlfile(job)
 
         # Try the canonical directory path first, then a glob for sub-dirs.
@@ -78,7 +94,9 @@ class DataPumpWorkflow(DumpWorkflow):
             )
             sql_text = result.stdout if result.returncode == 0 else ""
 
-        return parse_sqlfile_tables(sql_text)
+        tables = parse_sqlfile_tables(sql_text)
+        LOGGER.info("SQLFILE discovery found %d tables", len(tables))
+        return tables
 
     def required_tablespaces(self) -> frozenset[str]:
         """Modern Data Pump imports never require pre-created tablespaces."""
@@ -86,6 +104,7 @@ class DataPumpWorkflow(DumpWorkflow):
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import table DDL only (``CONTENT=METADATA_ONLY``) into the staging schema."""
+        LOGGER.debug("Importing metadata for %s.%s -> %s", source_schema, table, stage_schema)
         job = ImportJob(
             connection=self._credentials,
             directory=self._directory,
@@ -108,6 +127,9 @@ class DataPumpWorkflow(DumpWorkflow):
         partition_name: str | None,
     ) -> None:
         """Import one chunk of table data into the staging schema."""
+        LOGGER.debug(
+            "Importing chunk %s for %s.%s -> %s", chunk_name, source_schema, table, stage_schema
+        )
         job = ImportJob(
             connection=self._credentials,
             directory=self._directory,

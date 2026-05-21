@@ -5,9 +5,9 @@
 with the underlying dump format.  Concrete implementations live in the
 ``modern`` and ``legacy`` sub-packages:
 
-* :class:`~oracle_dmp_converter.datapump.modern.workflow.DataPumpWorkflow` –
+* :class:`~oracle_dmp_converter.datapump.modern.workflow.DataPumpWorkflow` -
   for dumps produced by ``expdp`` (modern Data Pump).
-* :class:`~oracle_dmp_converter.datapump.legacy.workflow.LegacyDumpWorkflow` –
+* :class:`~oracle_dmp_converter.datapump.legacy.workflow.LegacyDumpWorkflow` -
   for dumps produced by legacy ``exp``.
 
 The :func:`create_workflow` factory auto-detects the format: it first
@@ -94,7 +94,16 @@ class DumpWorkflow(ABC):
 
 @dataclass(frozen=True)
 class WorkflowConfig:
-    """All parameters required to build either workflow implementation."""
+    """All parameters required to build either workflow implementation.
+
+    Attributes:
+        credentials: Oracle credentials used in the parfile ``USERID`` field.
+        directory: Oracle DIRECTORY object name (e.g. ``"DUMP_DIR"``).
+        directory_path: OS path inside the container that *directory* maps to.
+        dumpfiles: Tuple of dump file base-names (without directory path).
+        container: Running Oracle Docker container.
+        work_dir: Local directory for temporary parfiles.
+    """
 
     credentials: OracleCredentials
     directory: str
@@ -139,6 +148,7 @@ def create_workflow(cfg: WorkflowConfig) -> DumpWorkflow:
 
     # Probe the format by attempting table discovery with the modern workflow.
     # If it raises DataPumpError containing a legacy-format ORA code, fall back.
+    LOGGER.info("Probing dump format via impdp SQLFILE (files: %s)", ", ".join(cfg.dumpfiles))
     try:
         tables = modern_workflow.discover_tables()
     except DataPumpError as exc:
@@ -153,6 +163,8 @@ def create_workflow(cfg: WorkflowConfig) -> DumpWorkflow:
             inspect_runner=legacy_inspect,
             convert_runner=legacy_convert,
         )
+
+    LOGGER.info("Modern Data Pump format confirmed; discovered %d tables", len(tables))
 
     # Modern probe succeeded — but we already consumed the discovery result
     # by calling discover_tables() above.  Wrap the workflow so the converter
@@ -174,6 +186,16 @@ class _ProbedModernWorkflow(DumpWorkflow):
         inner: DumpWorkflow,
         discovered_tables: tuple[tuple[str, str], ...],
     ) -> None:
+        """Wrap *inner* and cache the already-computed table list.
+
+        Args:
+            inner: The probed
+                :class:`~oracle_dmp_converter.datapump.modern.workflow.DataPumpWorkflow`
+                whose ``discover_tables()`` has already been called.
+            discovered_tables: The ``(schema, table)`` pairs returned by
+                the probe run; returned verbatim by :meth:`discover_tables`
+                without re-running the ``SQLFILE=`` job.
+        """
         self._inner = inner
         self._cached_tables = discovered_tables
 

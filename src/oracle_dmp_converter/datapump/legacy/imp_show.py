@@ -2,13 +2,13 @@
 
 Two output formats are handled:
 
-1. **INDEXFILE output** – produced by ``imp INDEXFILE=/path/file.sql``.
+1. **INDEXFILE output** - produced by ``imp INDEXFILE=/path/file.sql``.
    The file contains ``CREATE TABLE`` DDL, which may be schema-qualified
    (``"SCHEMA"."TABLE"``) when a full import is performed.  The regex is
    shared with the modern Data Pump SQLFILE parser via
    :mod:`oracle_dmp_converter.datapump._ddl_parser`.
 
-2. **SHOW=Y log output** – produced by running ``imp SHOW=Y``.  The log
+2. **SHOW=Y log output** - produced by running ``imp SHOW=Y``.  The log
    contains lines like::
 
        . importing SRC's objects into SRC

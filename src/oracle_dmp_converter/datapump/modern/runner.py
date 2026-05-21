@@ -34,16 +34,61 @@ class DataPumpRunner(_BaseRunner):
     """Executes modern Data Pump (expdp/impdp) jobs inside a Docker container."""
 
     def __init__(self, container: DockerOracle, work_dir: Path) -> None:
+        """Initialise the runner with a target container and local work directory.
+
+        Args:
+            container: Running :class:`~oracle_dmp_converter.docker_oracle.DockerOracle`
+                instance in which ``expdp`` / ``impdp`` commands will be executed.
+            work_dir: Local directory for temporary parfiles; passed directly
+                to :class:`~oracle_dmp_converter.datapump._base_runner._BaseRunner`.
+        """
         super().__init__(container, work_dir)
 
     def run_expdp(self, job: ExportJob) -> str:
+        """Run an ``expdp`` export job and return the combined output.
+
+        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
+        exit from ``expdp``.
+
+        Args:
+            job: Export job parameters used to render the parfile.
+
+        Returns:
+            Combined stdout + stderr from the ``expdp`` invocation.
+        """
         return self._run_tool(["expdp"], render_export_parfile(job), "expdp")
 
     def run_impdp(self, job: ImportJob) -> str:
+        """Run an ``impdp`` import job and return the combined output.
+
+        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
+        exit from ``impdp``.
+
+        Args:
+            job: Import job parameters used to render the parfile.
+
+        Returns:
+            Combined stdout + stderr from the ``impdp`` invocation.
+        """
         return self._run_tool(["impdp"], render_import_parfile(job), "impdp")
 
     def run_sqlfile(self, job: SqlFileJob) -> str:
-        return self._run_tool(["impdp"], render_sqlfile_parfile(job), "sqlfile")
+        """Run ``impdp SQLFILE=`` to extract DDL into a file inside the container.
+
+        Data Pump writes CREATE TABLE / CREATE INDEX statements to the SQLFILE
+        without touching any schema objects.  The file can then be read and
+        parsed to discover tables in the dump.
+
+        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
+        exit from ``impdp``.
+
+        Args:
+            job: SQLFILE job parameters used to render the parfile.
+
+        Returns:
+            Combined stdout + stderr from the ``impdp`` invocation.
+        """
+        return self._run_tool(["impdp"], render_sqlfile_parfile(job), "impdp-sqlfile")
 
     def read_remote_file(self, path: str) -> str:
         """Read a file from inside the container, returning its contents or ''."""

@@ -28,6 +28,14 @@ class OracleCredentials:
 
     @property
     def userid(self) -> str:
+        """Return the ``user/password@service`` connection string.
+
+        This format is accepted by both Data Pump (``expdp``/``impdp``) and
+        legacy (``exp``/``imp``) parfiles as the ``USERID`` parameter.
+
+        Returns:
+            Connection string of the form ``"user/password@service"``.
+        """
         return f"{self.user}/{self.password}@{self.service}"
 
 
@@ -40,6 +48,21 @@ def oracle_connection(
     user: str,
     password: str,
 ) -> Iterator[oracledb.Connection]:
+    """Context manager that yields a connected :class:`oracledb.Connection`.
+
+    Closes the connection when the ``with`` block exits, whether normally or
+    due to an exception.
+
+    Args:
+        host: Database hostname or IP address.
+        port: TNS listener port.
+        service: Oracle service name (e.g. ``"FREEPDB1"``).
+        user: Oracle username.
+        password: Oracle password.
+
+    Yields:
+        An open :class:`oracledb.Connection`.
+    """
     conn = oracledb.connect(user=user, password=password, dsn=f"{host}:{port}/{service}")
     try:
         yield conn
@@ -48,6 +71,15 @@ def oracle_connection(
 
 
 def _oracle_error_code(exc: Exception) -> int | None:
+    """Extract the ORA- error code from an :class:`oracledb.DatabaseError`.
+
+    Args:
+        exc: The exception to inspect.
+
+    Returns:
+        The integer ORA- code if *exc* is a database error with a parseable
+        code attribute, otherwise ``None``.
+    """
     if not isinstance(exc, oracledb.DatabaseError):
         return None
     error = exc.args[0]
@@ -55,6 +87,21 @@ def _oracle_error_code(exc: Exception) -> int | None:
 
 
 def execute_ignore(conn: oracledb.Connection, sql: str, ignored_codes: set[int]) -> None:
+    """Execute *sql*, suppressing specified ORA- error codes.
+
+    Useful for idempotent DDL (``DROP … IF EXISTS`` semantics) where Oracle
+    does not provide a native ``IF EXISTS`` clause.
+
+    Args:
+        conn: Active Oracle connection.
+        sql: SQL statement to execute.
+        ignored_codes: Set of ORA- error codes (e.g. ``{942}`` for
+            ``ORA-00942: table or view does not exist``) that should be
+            silently swallowed.
+
+    Raises:
+        Exception: Any database error whose code is not in *ignored_codes*.
+    """
     try:
         with conn.cursor() as cursor:
             cursor.execute(sql)
@@ -64,12 +111,33 @@ def execute_ignore(conn: oracledb.Connection, sql: str, ignored_codes: set[int])
 
 
 def drop_schema(conn: oracledb.Connection, schema: str) -> None:
+    """Drop an Oracle schema and all its objects (``CASCADE``).
+
+    ``ORA-01918`` (user does not exist) is silently ignored, making this
+    operation idempotent.
+
+    Args:
+        conn: Active Oracle connection with ``DROP USER`` privilege.
+        schema: Schema name to drop.
+    """
+    LOGGER.info("Dropping schema %s", schema)
     execute_ignore(conn, f"DROP USER {oracle_identifier(schema)} CASCADE", {1918})
 
 
 def ensure_schema(conn: oracledb.Connection, schema: str, password: str) -> None:
+    """Create the schema user, or unlock and reset the password if it already exists.
+
+    On success the schema is granted ``CONNECT`` and ``RESOURCE`` roles and
+    unlimited quota on the ``USERS`` tablespace.
+
+    Args:
+        conn: Active Oracle connection with ``CREATE USER`` privilege.
+        schema: Schema (user) name to create or reset.
+        password: Password to assign to the schema user.
+    """
     ident = oracle_identifier(schema)
     quoted_password = '"' + password.replace('"', '""') + '"'
+    LOGGER.info("Creating/unlocking schema %s", schema)
     try:
         with conn.cursor() as cursor:
             cursor.execute(f"CREATE USER {ident} IDENTIFIED BY {quoted_password}")
@@ -86,6 +154,14 @@ def ensure_schema(conn: oracledb.Connection, schema: str, password: str) -> None
 
 
 def create_directory(conn: oracledb.Connection, name: str, path: str) -> None:
+    """Create or replace an Oracle DIRECTORY object.
+
+    Args:
+        conn: Active Oracle connection with ``CREATE ANY DIRECTORY`` privilege.
+        name: Directory object name.
+        path: OS path inside the Oracle server (container) to map.
+    """
+    LOGGER.info("Creating Oracle DIRECTORY %s -> %s", name, path)
     escaped_path = path.replace("'", "''")
     with conn.cursor() as cursor:
         cursor.execute(f"CREATE OR REPLACE DIRECTORY {oracle_identifier(name)} AS '{escaped_path}'")
@@ -93,10 +169,31 @@ def create_directory(conn: oracledb.Connection, name: str, path: str) -> None:
 
 
 def drop_table(conn: oracledb.Connection, schema: str, table: str) -> None:
+    """Drop a table, purging it from the recycle bin.
+
+    ``ORA-00942`` (table or view does not exist) is silently ignored, making
+    this operation idempotent.
+
+    Args:
+        conn: Active Oracle connection.
+        schema: Table owner.
+        table: Table name to drop.
+    """
+    LOGGER.debug("Dropping table %s.%s", schema, table)
     execute_ignore(conn, f"DROP TABLE {oracle_qualified_name(schema, table)} PURGE", {942})
 
 
 def count_rows(conn: oracledb.Connection, schema: str, table: str) -> int:
+    """Return the exact row count of a table via ``SELECT COUNT(*)``.
+
+    Args:
+        conn: Active Oracle connection.
+        schema: Table owner.
+        table: Table name.
+
+    Returns:
+        Number of rows in ``schema.table``.
+    """
     with conn.cursor() as cursor:
         cursor.execute(f"SELECT COUNT(*) FROM {oracle_qualified_name(schema, table)}")
         value = cursor.fetchone()[0]
@@ -111,6 +208,7 @@ def ensure_tablespace(
 ) -> None:
     """Create *tablespace* if it does not already exist (ORA-01543 is ignored)."""
     datafile = f"{datafile_dir}/{tablespace.lower()}01.dbf"
+    LOGGER.info("Creating tablespace %s (datafile %s)", tablespace, datafile)
     execute_ignore(
         conn,
         f"CREATE TABLESPACE {oracle_identifier(tablespace)}"
@@ -122,6 +220,7 @@ def ensure_tablespace(
 
 def grant_quota_unlimited(conn: oracledb.Connection, schema: str, tablespace: str) -> None:
     """Grant QUOTA UNLIMITED on *tablespace* to *schema*."""
+    LOGGER.debug("Granting QUOTA UNLIMITED on %s to %s", tablespace, schema)
     with conn.cursor() as cursor:
         cursor.execute(
             f"ALTER USER {oracle_identifier(schema)}"
@@ -131,6 +230,17 @@ def grant_quota_unlimited(conn: oracledb.Connection, schema: str, tablespace: st
 
 
 def table_exists(conn: oracledb.Connection, schema: str, table: str) -> bool:
+    """Check whether a table exists in ``ALL_TABLES``.
+
+    Args:
+        conn: Active Oracle connection.
+        schema: Table owner.
+        table: Table name.
+
+    Returns:
+        ``True`` if the table exists and is visible to the connected user,
+        ``False`` otherwise.
+    """
     with conn.cursor() as cursor:
         cursor.execute(
             """

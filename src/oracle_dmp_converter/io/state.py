@@ -12,6 +12,24 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ChunkState:
+    """Persisted state record for a single conversion chunk.
+
+    Written to SQLite by :class:`StateStore` so that interrupted conversions
+    can resume from where they left off.
+
+    Attributes:
+        table_name: Fully-qualified ``SCHEMA.TABLE`` identifier.
+        chunk_name: Chunk identifier, e.g. ``"whole"`` or
+            ``"partition-00001-P_NORTH"``.
+        status: Current processing status: ``"running"``, ``"completed"``, or
+            ``"failed"``.
+        imported_rows: Row count from the staging table after import; ``None``
+            until the import is complete.
+        output_rows: Row count written to the output file; ``None`` until the
+            export is complete.
+        error: Error message if *status* is ``"failed"``; ``None`` otherwise.
+    """
+
     table_name: str
     chunk_name: str
     status: str
@@ -21,7 +39,30 @@ class ChunkState:
 
 
 class StateStore:
+    """SQLite-backed store for chunk conversion state.
+
+    Enables resumable conversions: before processing a chunk its state is set
+    to ``"running"``; on success it transitions to ``"completed"``; on failure
+    to ``"failed"``.  A subsequent run can detect ``"completed"`` chunks and
+    skip them.
+
+    The database file is created at *path* (with parent directories) on
+    construction.  A schema migration from the legacy ``parquet_rows`` column
+    name to ``output_rows`` is applied automatically.
+
+    Can be used as a context manager; :meth:`close` is called on exit.
+    """
+
     def __init__(self, path: Path) -> None:
+        """Open (or create) the SQLite database at *path*.
+
+        Creates the ``chunks`` table if it does not exist and runs any pending
+        migrations.
+
+        Args:
+            path: Filesystem path for the SQLite database file.  Parent
+                directories are created as needed.
+        """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
@@ -55,15 +96,37 @@ class StateStore:
             self.conn.commit()
 
     def close(self) -> None:
+        """Close the underlying SQLite connection."""
         self.conn.close()
 
     def __enter__(self) -> StateStore:
+        """Support use as a context manager; returns ``self``.
+
+        Returns:
+            This :class:`StateStore` instance.
+        """
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """Close the store on context manager exit.
+
+        Args:
+            exc_type: Exception type, or ``None``.
+            exc: Exception instance, or ``None``.
+            tb: Traceback, or ``None``.
+        """
         self.close()
 
     def upsert(self, state: ChunkState) -> None:
+        """Insert or update a :class:`ChunkState` record.
+
+        Uses ``INSERT … ON CONFLICT … DO UPDATE`` so that repeated calls for
+        the same ``(table_name, chunk_name)`` pair replace the previous row.
+        Changes are committed immediately.
+
+        Args:
+            state: The chunk state to persist.
+        """
         self.conn.execute(
             """
             INSERT INTO chunks(table_name, chunk_name, status, imported_rows, output_rows, error)
@@ -86,6 +149,16 @@ class StateStore:
         self.conn.commit()
 
     def get(self, table_name: str, chunk_name: str) -> ChunkState | None:
+        """Retrieve the stored state for a specific chunk.
+
+        Args:
+            table_name: Fully-qualified ``SCHEMA.TABLE`` identifier.
+            chunk_name: Chunk identifier.
+
+        Returns:
+            The persisted :class:`ChunkState`, or ``None`` if no record
+            exists for the given pair.
+        """
         row = self.conn.execute(
             """
             SELECT table_name, chunk_name, status, imported_rows, output_rows, error

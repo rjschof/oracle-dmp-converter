@@ -23,6 +23,13 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ExportResult:
+    """Result of a single table export operation.
+
+    Attributes:
+        path: Absolute path to the written output file.
+        rows: Total number of rows written.
+    """
+
     path: Path
     rows: int
 
@@ -31,6 +38,20 @@ def arrow_type_for_column(
     column: ColumnMetadata,
     override: ColumnOverride | None = None,
 ) -> pa.DataType:
+    """Resolve the Arrow :class:`~pyarrow.DataType` for an Oracle column.
+
+    Delegates to :func:`~oracle_dmp_converter.oracle.types.oracle_to_arrow_token`
+    and maps the returned token string to a concrete Arrow type.  Falls back
+    to ``pa.string()`` for any unrecognised token.
+
+    Args:
+        column: Column metadata from ``ALL_TAB_COLUMNS``.
+        override: Optional per-column override; a ``parquet_type`` field
+            in the override takes priority over the default mapping.
+
+    Returns:
+        The Arrow :class:`~pyarrow.DataType` for the column.
+    """
     type_name = oracle_to_arrow_token(column, override)
     if type_name == "int64":
         return pa.int64()
@@ -52,6 +73,16 @@ def arrow_schema_for_columns(
     columns: tuple[ColumnMetadata, ...],
     overrides: dict[str, ColumnOverride] | None = None,
 ) -> pa.Schema:
+    """Build a PyArrow :class:`~pyarrow.Schema` for a tuple of Oracle columns.
+
+    Args:
+        columns: Ordered column metadata from ``ALL_TAB_COLUMNS``.
+        overrides: Optional mapping of column name → override; keys are
+            matched case-sensitively against ``column.name``.
+
+    Returns:
+        A :class:`~pyarrow.Schema` with one field per column, in ordinal order.
+    """
     overrides = overrides or {}
     fields = [
         pa.field(column.name, arrow_type_for_column(column, overrides.get(column.name)))
@@ -61,12 +92,40 @@ def arrow_schema_for_columns(
 
 
 def _read_lob(value: Any) -> Any:
+    """Read a LOB value into a plain Python object if needed.
+
+    ``oracledb`` returns CLOB/BLOB columns as :class:`oracledb.LOB` objects
+    with a ``read()`` method.  This helper calls ``read()`` when present,
+    returning the raw bytes/str, and passes any other value through unchanged.
+
+    Args:
+        value: Row value as returned by ``oracledb``.
+
+    Returns:
+        The materialised value (``str`` or ``bytes`` for LOBs, or the
+        original value unchanged for everything else).
+    """
     if hasattr(value, "read") and callable(value.read):
         return value.read()
     return value
 
 
 def _coerce_value(value: Any, arrow_type: pa.DataType) -> Any:
+    """Coerce a raw Oracle row value to the Python type expected by PyArrow.
+
+    Handles LOB materialisation, string/bytes coercion, integer and float
+    casting, ``Decimal`` quantisation for ``decimal128`` columns, and
+    ``date`` → ``datetime`` promotion for timestamp columns.
+
+    Args:
+        value: Raw value from ``oracledb`` (post-LOB-read via :func:`_read_lob`
+               is applied internally).
+        arrow_type: Target Arrow type for the column.
+
+    Returns:
+        A Python object compatible with ``pa.array([value], type=arrow_type)``,
+        or ``None`` if *value* is ``None``.
+    """
     value = _read_lob(value)
     if value is None:
         return None
@@ -98,6 +157,21 @@ def _coerce_value(value: Any, arrow_type: pa.DataType) -> Any:
 
 
 def _rows_to_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Table:
+    """Convert a list of raw Oracle rows to a :class:`~pyarrow.Table`.
+
+    Each column is built as a :class:`~pyarrow.Array` by calling
+    :func:`_coerce_value` on every row element so that Oracle-specific types
+    (LOBs, ``Decimal``, ``date``) are properly normalised before PyArrow sees
+    them.
+
+    Args:
+        rows: List of row tuples as returned by ``cursor.fetchmany()``.
+        schema: Arrow schema describing the expected columns and types.
+
+    Returns:
+        A :class:`~pyarrow.Table` with *schema* and one row per element in
+        *rows*.
+    """
     arrays = []
     for index, field in enumerate(schema):
         values = [_coerce_value(row[index], field.type) for row in rows]
