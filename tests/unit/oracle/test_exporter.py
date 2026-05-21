@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
@@ -15,7 +18,9 @@ from oracle_dmp_converter.oracle.exporter import (
     _rows_to_table,
     arrow_schema_for_columns,
     arrow_type_for_column,
+    export_table,
 )
+from oracle_dmp_converter.models import OutputFormat
 
 
 def _col(
@@ -142,3 +147,83 @@ def test_rows_to_table_empty() -> None:
     schema = pa.schema([pa.field("id", pa.int64())])
     table = _rows_to_table([], schema)
     assert table.num_rows == 0
+
+
+# ---------------------------------------------------------------------------
+# export_table — SQL generation (partition_name)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_conn(executed_sqls: list[str]) -> MagicMock:
+    """Return a mock oracledb.Connection that records executed SQL statements."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchmany.return_value = []  # empty table → no rows
+
+    @contextmanager
+    def _cursor_ctx():
+        yield mock_cursor
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = _cursor_ctx
+
+    def _capture_execute(sql: str) -> None:
+        executed_sqls.append(sql)
+
+    mock_cursor.execute.side_effect = _capture_execute
+    return mock_conn
+
+
+def _simple_columns() -> tuple[ColumnMetadata, ...]:
+    return (ColumnMetadata("ID", "NUMBER", 1, data_precision=10, data_scale=0),)
+
+
+def test_export_table_sql_no_partition(tmp_path: Path) -> None:
+    """Without partition_name the FROM clause has no PARTITION token."""
+    sqls: list[str] = []
+    conn = _make_mock_conn(sqls)
+    mock_writer = MagicMock()
+    mock_writer.write_empty = MagicMock()
+    mock_writer.close = MagicMock()
+
+    with patch("oracle_dmp_converter.oracle.exporter.make_writer", return_value=mock_writer):
+        export_table(
+            conn,
+            schema_name="DMP_FINANCE",
+            table_name="TRANSACTIONS",
+            columns=_simple_columns(),
+            output_path=tmp_path / "out.parquet",
+            output_format=OutputFormat.PARQUET,
+        )
+
+    assert len(sqls) == 1
+    assert "PARTITION" not in sqls[0].upper()
+    assert "DMP_FINANCE" in sqls[0]
+    assert "TRANSACTIONS" in sqls[0]
+
+
+def test_export_table_sql_with_partition(tmp_path: Path) -> None:
+    """With partition_name the FROM clause includes PARTITION (name)."""
+    sqls: list[str] = []
+    conn = _make_mock_conn(sqls)
+    mock_writer = MagicMock()
+    mock_writer.write_empty = MagicMock()
+    mock_writer.close = MagicMock()
+
+    with patch("oracle_dmp_converter.oracle.exporter.make_writer", return_value=mock_writer):
+        export_table(
+            conn,
+            schema_name="DMP_FINANCE",
+            table_name="TRANSACTIONS",
+            columns=_simple_columns(),
+            output_path=tmp_path / "out.parquet",
+            output_format=OutputFormat.PARQUET,
+            partition_name="P_2024_Q1",
+        )
+
+    assert len(sqls) == 1
+    sql_upper = sqls[0].upper()
+    assert "PARTITION" in sql_upper
+    assert "P_2024_Q1" in sqls[0]
+    # Verify the PARTITION clause appears after the table reference
+    from_idx = sql_upper.index("FROM")
+    assert sql_upper.index("PARTITION") > from_idx

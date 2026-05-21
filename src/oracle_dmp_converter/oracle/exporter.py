@@ -189,11 +189,18 @@ def export_table(
     output_format: OutputFormat = OutputFormat.PARQUET,
     column_overrides: dict[str, ColumnOverride] | None = None,
     batch_size: int = 10_000,
+    partition_name: str | None = None,
 ) -> ExportResult:
     """Export *table_name* from *conn* to *output_path* in *output_format*.
 
     Rows are streamed in batches of *batch_size* to keep memory bounded.
     An empty output file is always produced even when the table has no rows.
+
+    When *partition_name* is provided, only rows belonging to that Oracle
+    partition are exported via a ``PARTITION (name)`` clause in the
+    ``FROM`` expression.  This is used by the batch-import path where the
+    staging table contains all partitions' rows after a single ``impdp``
+    call and each chunk must still produce a partition-scoped output file.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     column_overrides = column_overrides or {}
@@ -203,7 +210,10 @@ def export_table(
         f"AS {oracle_identifier(column.name)}"
         for column in columns
     )
-    sql = f"SELECT {select_list} FROM {oracle_qualified_name(schema_name, table_name)}"
+    table_ref = oracle_qualified_name(schema_name, table_name)
+    if partition_name:
+        table_ref = f"{table_ref} PARTITION ({oracle_identifier(partition_name)})"
+    sql = f"SELECT {select_list} FROM {table_ref}"
 
     total_rows = 0
     writer: FormatWriter = make_writer(output_format, output_path, arrow_schema)

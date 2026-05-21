@@ -51,6 +51,11 @@ LOGGER = logging.getLogger(__name__)
 
 _STAGE_SCHEMA_PREFIX = "DMP_"
 
+# Number of tables combined into a single impdp/imp invocation.  Batching
+# reduces per-table process-startup overhead at the cost of coarser
+# resumability granularity (a failed batch re-imports all its tables).
+TABLE_IMPORT_BATCH_SIZE = 20
+
 
 @dataclass(frozen=True)
 class OracleAdminConnection:
@@ -500,6 +505,7 @@ class OracleDumpConverter:
         table: str,
         chunk_name: str,
         output_dir: Path,
+        partition_name: str | None = None,
     ) -> ChunkConversionResult:
         """Export a staging table to the configured output format.
 
@@ -508,12 +514,22 @@ class OracleDumpConverter:
         :func:`~oracle_dmp_converter.oracle.exporter.export_table` to stream
         rows to the output file.
 
+        When *partition_name* is provided, both the row count and the data
+        export are scoped to that partition via a ``PARTITION (name)`` clause.
+        This is required for the batch-import path where a single ``impdp``
+        call loads all partitions into the staging table at once; without the
+        filter, every partition chunk would export the full table.
+
         Args:
             source_schema: Original Oracle schema name (used for output path
                 and config override lookups).
             table: Table name.
             chunk_name: Chunk identifier used to construct the output filename.
             output_dir: Root output directory.
+            partition_name: Oracle partition name to scope the export and row
+                count to; ``None`` reads the entire staging table (used by the
+                per-chunk import path which always has a single partition in
+                staging).
 
         Returns:
             A :class:`ChunkConversionResult` with row counts and the output
@@ -529,7 +545,7 @@ class OracleDumpConverter:
         )
         with self._connect() as conn:
             metadata = discover_table_metadata(conn, stage_schema, table)
-            imported_rows = count_rows(conn, stage_schema, table)
+            imported_rows = count_rows(conn, stage_schema, table, partition_name)
             col_overrides = {
                 col.name: ov
                 for col in metadata.columns
@@ -543,6 +559,7 @@ class OracleDumpConverter:
                 output_path=output_path,
                 output_format=self.output_format,
                 column_overrides=col_overrides or None,
+                partition_name=partition_name,
             )
         return ChunkConversionResult(
             name=chunk_name,
@@ -672,6 +689,164 @@ class OracleDumpConverter:
             chunks=tuple(chunk_results),
         )
 
+    def convert_table_batch(
+        self,
+        table_plans: list[TablePlan],
+        output_dir: Path,
+        state_store: StateStore | None = None,
+    ) -> list[TableConversionResult]:
+        """Convert a batch of table plans using a single Oracle import invocation.
+
+        All pending chunks from every plan in *table_plans* are combined into
+        one ``impdp``/``imp`` call via
+        :meth:`~oracle_dmp_converter.datapump.workflow.DumpWorkflow.import_chunks_batch`,
+        then each chunk is exported individually.  Chunks already recorded as
+        ``"completed"`` in *state_store* are skipped.
+
+        If the batch import itself raises, every pending chunk is marked
+        ``"failed"`` before re-raising.  If an individual export raises, only
+        that chunk is marked ``"failed"`` and the exception propagates.
+
+        Args:
+            table_plans: The batch of table plans to process together.
+            output_dir: Root output directory.
+            state_store: Optional SQLite state store for resumability.
+
+        Returns:
+            One :class:`TableConversionResult` per entry in *table_plans*,
+            in the same order.
+        """
+        # Prepare staging schemas for every unique source schema in the batch.
+        seen_schemas: set[str] = set()
+        for tp in table_plans:
+            if tp.schema not in seen_schemas:
+                self.prepare_stage_schema(tp.schema)
+                seen_schemas.add(tp.schema)
+
+        # Partition chunks into already-completed and still-pending.
+        # chunk_results accumulates results keyed by qualified_name so we can
+        # reconstruct TableConversionResult in the original plan order.
+        chunk_results: dict[str, list[ChunkConversionResult]] = {
+            tp.qualified_name: [] for tp in table_plans
+        }
+        pending: list[tuple[TablePlan, ChunkPlan]] = []
+
+        for tp in table_plans:
+            for chunk in tp.chunks:
+                state = (
+                    state_store.get(tp.qualified_name, chunk.name) if state_store else None
+                )
+                if state and state.status == "completed":
+                    output_path = _chunk_output_path(
+                        source_schema=tp.schema,
+                        table=tp.table,
+                        chunk_name=chunk.name,
+                        output_dir=output_dir,
+                        output_format=self.output_format,
+                    )
+                    chunk_results[tp.qualified_name].append(
+                        ChunkConversionResult(
+                            name=chunk.name,
+                            imported_rows=state.imported_rows or 0,
+                            output_rows=state.output_rows or 0,
+                            output_path=output_path,
+                        )
+                    )
+                else:
+                    pending.append((tp, chunk))
+
+        if not pending:
+            return [
+                TableConversionResult(
+                    source_schema=tp.schema,
+                    table=tp.table,
+                    chunks=tuple(chunk_results[tp.qualified_name]),
+                )
+                for tp in table_plans
+            ]
+
+        # Mark every pending chunk as running before touching Oracle.
+        if state_store:
+            for tp, chunk in pending:
+                state_store.upsert(ChunkState(tp.qualified_name, chunk.name, "running"))
+
+        # For legacy imp, truncate each staging table before the batch import
+        # (impdp uses TABLE_EXISTS_ACTION=TRUNCATE internally; imp does not).
+        workflow = self._require_workflow()
+        if workflow.dump_format == DumpFormat.LEGACY:
+            with self._connect() as conn:
+                truncated: set[tuple[str, str]] = set()
+                for tp, _ in pending:
+                    stage_schema = self._stage_schema_for(tp.schema)
+                    key = (stage_schema, tp.table)
+                    if key not in truncated:
+                        truncate_table(conn, stage_schema, tp.table)
+                        truncated.add(key)
+
+        import_specs: list[tuple[str, str, str, str, str | None]] = [
+            (
+                tp.schema,
+                self._stage_schema_for(tp.schema),
+                tp.table,
+                chunk.name,
+                chunk.partition_name,
+            )
+            for tp, chunk in pending
+        ]
+
+        try:
+            workflow.import_chunks_batch(import_specs)
+        except Exception as exc:
+            if state_store:
+                for tp, chunk in pending:
+                    state_store.upsert(
+                        ChunkState(tp.qualified_name, chunk.name, "failed", error=str(exc))
+                    )
+            raise
+
+        # Export each chunk and finalise state.
+        for tp, chunk in pending:
+            try:
+                result = self.export_stage_table(
+                    source_schema=tp.schema,
+                    table=tp.table,
+                    chunk_name=chunk.name,
+                    output_dir=output_dir,
+                    partition_name=chunk.partition_name,
+                )
+                if result.imported_rows != result.output_rows:
+                    msg = (
+                        f"row count mismatch for {tp.qualified_name} {chunk.name}: "
+                        f"imported={result.imported_rows}, output={result.output_rows}"
+                    )
+                    raise ValueError(msg)
+                if state_store:
+                    state_store.upsert(
+                        ChunkState(
+                            tp.qualified_name,
+                            chunk.name,
+                            "completed",
+                            result.imported_rows,
+                            result.output_rows,
+                        )
+                    )
+                chunk_results[tp.qualified_name].append(result)
+            except Exception as exc:
+                if state_store:
+                    state_store.upsert(
+                        ChunkState(tp.qualified_name, chunk.name, "failed", error=str(exc))
+                    )
+                raise
+
+        return [
+            TableConversionResult(
+                source_schema=tp.schema,
+                table=tp.table,
+                chunks=tuple(chunk_results[tp.qualified_name]),
+            )
+            for tp in table_plans
+        ]
+
     def convert_plan(
         self,
         plan: ConversionPlan,
@@ -696,7 +871,7 @@ class OracleDumpConverter:
         if self._workflow is None:
             self.use_format(plan.dump_format)
 
-        results: list[TableConversionResult] = []
+        supported: list[TablePlan] = []
         for table_plan in plan.tables:
             if table_plan.strategy == TableStrategy.UNSUPPORTED:
                 LOGGER.warning(
@@ -705,19 +880,26 @@ class OracleDumpConverter:
                     table_plan.table,
                     table_plan.reason or "unsupported strategy",
                 )
-                continue
+            else:
+                supported.append(table_plan)
+
+        results: list[TableConversionResult] = []
+        for batch_start in range(0, len(supported), TABLE_IMPORT_BATCH_SIZE):
+            batch = supported[batch_start : batch_start + TABLE_IMPORT_BATCH_SIZE]
             LOGGER.info(
-                "Converting %s.%s (%s)",
-                table_plan.schema,
-                table_plan.table,
-                table_plan.strategy,
+                "Importing batch of %d table(s) (%d–%d of %d)",
+                len(batch),
+                batch_start + 1,
+                batch_start + len(batch),
+                len(supported),
             )
-            table_result = self.convert_table_plan(table_plan, output_dir, state_store)
-            LOGGER.info(
-                "Converted %s.%s: %d rows",
-                table_plan.schema,
-                table_plan.table,
-                table_result.rows,
-            )
-            results.append(table_result)
+            batch_results = self.convert_table_batch(batch, output_dir, state_store)
+            for tp, table_result in zip(batch, batch_results, strict=True):
+                LOGGER.info(
+                    "Converted %s.%s: %d rows",
+                    tp.schema,
+                    tp.table,
+                    table_result.rows,
+                )
+            results.extend(batch_results)
         return PlanConversionResult(tables=tuple(results))

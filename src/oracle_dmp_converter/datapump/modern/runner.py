@@ -7,9 +7,11 @@ from pathlib import Path
 
 from oracle_dmp_converter.datapump._base_runner import _BaseRunner
 from oracle_dmp_converter.datapump.modern.parfile import (
+    BatchImportJob,
     ExportJob,
     ImportJob,
     SqlFileJob,
+    render_batch_import_parfile,
     render_export_parfile,
     render_import_parfile,
     render_sqlfile_parfile,
@@ -71,6 +73,21 @@ class DataPumpRunner(_BaseRunner):
             Combined stdout + stderr from the ``impdp`` invocation.
         """
         return self._run_tool(["impdp"], render_import_parfile(job), "impdp")
+
+    def run_batch_impdp(self, job: BatchImportJob) -> str:
+        """Run a single ``impdp`` call that imports multiple tables at once.
+
+        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
+        exit from ``impdp``.
+
+        Args:
+            job: Batch import job parameters; all table specs are combined into
+                a single ``TABLES=`` line in the rendered parfile.
+
+        Returns:
+            Combined stdout + stderr from the ``impdp`` invocation.
+        """
+        return self._run_tool(["impdp"], render_batch_import_parfile(job), "impdp-batch")
 
     def run_sqlfile(self, job: SqlFileJob) -> str:
         """Run ``impdp SQLFILE=`` to extract DDL into a file inside the container.

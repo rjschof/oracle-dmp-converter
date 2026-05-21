@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from oracle_dmp_converter.datapump.modern.parfile import ImportJob, SqlFileJob
+from oracle_dmp_converter.datapump.modern.parfile import BatchImportJob, ImportJob, SqlFileJob
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
 from oracle_dmp_converter.datapump.modern.sqlfile import parse_sqlfile_tables
 from oracle_dmp_converter.datapump.workflow import DumpWorkflow
@@ -170,6 +170,42 @@ class DataPumpWorkflow(DumpWorkflow):
             content="DATA_ONLY",
         )
         self._convert_runner.run_impdp(job)
+
+    def import_chunks_batch(
+        self,
+        chunks: list[tuple[str, str, str, str, str | None]],
+    ) -> None:
+        """Import multiple chunks in a single ``impdp`` invocation.
+
+        Combines all ``(source_schema, stage_schema, table, chunk_name,
+        partition_name)`` specs into one ``TABLES=`` line so Oracle starts a
+        single import process for the entire batch instead of one per chunk.
+        """
+        if not chunks:
+            return
+        LOGGER.debug("Batch-importing %d chunks via single impdp call", len(chunks))
+        table_specs = tuple(
+            (source_schema, table, partition_name)
+            for source_schema, _stage_schema, table, _chunk_name, partition_name in chunks
+        )
+        # Deduplicate remap pairs while preserving insertion order.
+        seen: dict[str, str] = {}
+        for source_schema, stage_schema, _table, _chunk_name, _partition_name in chunks:
+            seen.setdefault(source_schema, stage_schema)
+        remap_schemas = tuple(seen.items())
+        # Build a short logfile name from the first few table names.
+        table_names = [t for _s, _st, t, _c, _p in chunks[:3]]
+        logfile = f"impdp-batch-{'-'.join(table_names)}.log"[:120]
+        job = BatchImportJob(
+            connection=self._credentials,
+            directory=self._directory,
+            dumpfiles=self._dumpfiles,
+            logfile=logfile,
+            table_specs=table_specs,
+            remap_schemas=remap_schemas,
+            content="DATA_ONLY",
+        )
+        self._convert_runner.run_batch_impdp(job)
 
 
 def make_modern_runners(

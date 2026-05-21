@@ -86,6 +86,22 @@ class DumpWorkflow(ABC):
         because legacy ``imp`` has no ``QUERY=`` support.
         """
 
+    def import_chunks_batch(
+        self,
+        chunks: list[tuple[str, str, str, str, str | None]],
+    ) -> None:
+        """Import multiple chunks in a single Oracle tool invocation.
+
+        Each entry in *chunks* is a
+        ``(source_schema, stage_schema, table, chunk_name, partition_name)``
+        tuple.  Concrete implementations override this to combine all specs
+        into one ``impdp``/``imp`` call.  The default falls back to calling
+        :meth:`import_chunk` once per entry, which is always correct but
+        incurs one process startup per chunk.
+        """
+        for source_schema, stage_schema, table, chunk_name, partition_name in chunks:
+            self.import_chunk(source_schema, stage_schema, table, chunk_name, partition_name)
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -229,3 +245,9 @@ class _ProbedModernWorkflow(DumpWorkflow):
         partition_name: str | None,
     ) -> None:
         self._inner.import_chunk(source_schema, stage_schema, table, chunk_name, partition_name)
+
+    def import_chunks_batch(
+        self,
+        chunks: list[tuple[str, str, str, str, str | None]],
+    ) -> None:
+        self._inner.import_chunks_batch(chunks)

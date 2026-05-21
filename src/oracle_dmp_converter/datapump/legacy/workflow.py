@@ -202,6 +202,52 @@ class LegacyDumpWorkflow(DumpWorkflow):
         )
         self._convert_runner.run_imp(job)
 
+    def import_chunks_batch(
+        self,
+        chunks: list[tuple[str, str, str, str, str | None]],
+    ) -> None:
+        """Import multiple tables using as few ``imp`` invocations as possible.
+
+        Legacy ``imp`` only supports a single ``FROMUSER``/``TOUSER`` pair per
+        invocation, so cross-schema batching is not possible.  Chunks are
+        grouped by ``(source_schema, stage_schema)`` and one ``imp`` call is
+        issued per distinct schema pair, with all table names for that pair
+        combined into the ``TABLES=`` list.
+
+        ``chunk_name`` and ``partition_name`` are ignored — legacy ``imp`` has
+        no ``QUERY=`` support.
+        """
+        if not chunks:
+            return
+        # Group tables by (source_schema, stage_schema), preserving order.
+        schema_groups: dict[tuple[str, str], list[str]] = {}
+        for source_schema, stage_schema, table, _chunk_name, _partition_name in chunks:
+            key = (source_schema, stage_schema)
+            schema_groups.setdefault(key, []).append(table)
+
+        for (source_schema, stage_schema), tables in schema_groups.items():
+            unique_tables = tuple(dict.fromkeys(tables))
+            LOGGER.debug(
+                "Batch-importing %d legacy table(s) for %s -> %s via single imp call",
+                len(unique_tables),
+                source_schema,
+                stage_schema,
+            )
+            logfile = f"imp-batch-{source_schema}-{'-'.join(unique_tables[:3])}.log"[:120]
+            job = LegacyImportJob(
+                connection=self._credentials,
+                files=self._legacy_files(),
+                logfile=logfile,
+                fromuser=source_schema,
+                touser=stage_schema,
+                tables=unique_tables,
+                rows=True,
+                indexes=False,
+                grants=False,
+                constraints=False,
+            )
+            self._convert_runner.run_imp(job)
+
 
 def make_legacy_runners(
     container: object,

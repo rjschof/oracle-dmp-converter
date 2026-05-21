@@ -42,6 +42,37 @@ class ImportJob:
 
 
 @dataclass(frozen=True)
+class BatchImportJob:
+    """Parameter specification for a single ``impdp`` call that imports multiple tables.
+
+    Each entry in *table_specs* is a ``(source_schema, table, partition_name)`` triple
+    where *partition_name* is ``None`` for whole-table imports.  All specs are combined
+    into a single ``TABLES=`` line so that Oracle starts one import process for the
+    entire batch rather than one per table.
+
+    *remap_schemas* is a tuple of ``(source_schema, stage_schema)`` pairs; one
+    ``REMAP_SCHEMA=`` line is written per pair, allowing tables from different source
+    schemas to be imported in the same job.
+    """
+
+    connection: OracleCredentials
+    directory: str
+    dumpfiles: tuple[str, ...]
+    logfile: str
+    # Each entry: (source_schema, table, partition_name_or_None)
+    table_specs: tuple[tuple[str, str, str | None], ...]
+    remap_schemas: tuple[tuple[str, str], ...] = ()
+    content: str | None = None
+    table_exists_action: str = "TRUNCATE"
+    exclude: tuple[str, ...] = field(
+        default=("INDEX", "CONSTRAINT", "REF_CONSTRAINT", "TRIGGER", "STATISTICS", "GRANT")
+    )
+    transform: tuple[str, ...] = field(
+        default=("DISABLE_ARCHIVE_LOGGING:Y", "SEGMENT_ATTRIBUTES:N")
+    )
+
+
+@dataclass(frozen=True)
 class SqlFileJob:
     connection: OracleCredentials
     directory: str
@@ -93,6 +124,30 @@ def render_import_parfile(job: ImportJob) -> str:
         lines.append(f"CONTENT={job.content}")
     if job.remap_schema:
         source, target = job.remap_schema
+        lines.append(f"REMAP_SCHEMA={oracle_identifier(source)}:{oracle_identifier(target)}")
+    for object_type in job.exclude:
+        lines.append(f"EXCLUDE={object_type}")
+    return "\n".join(lines) + "\n"
+
+
+def render_batch_import_parfile(job: BatchImportJob) -> str:
+    tables_value = ", ".join(
+        _table_spec(schema, table, partition)
+        for schema, table, partition in job.table_specs
+    )
+    lines = [
+        f"USERID={job.connection.userid}",
+        f"DIRECTORY={job.directory}",
+        f"DUMPFILE={','.join(job.dumpfiles)}",
+        f"LOGFILE={job.logfile}",
+        f"TABLES={tables_value}",
+        f"TABLE_EXISTS_ACTION={job.table_exists_action}",
+    ]
+    for transform in job.transform:
+        lines.append(f"TRANSFORM={transform}")
+    if job.content:
+        lines.append(f"CONTENT={job.content}")
+    for source, target in job.remap_schemas:
         lines.append(f"REMAP_SCHEMA={oracle_identifier(source)}:{oracle_identifier(target)}")
     for object_type in job.exclude:
         lines.append(f"EXCLUDE={object_type}")
