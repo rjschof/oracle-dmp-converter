@@ -12,6 +12,7 @@ import yaml
 from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
+    ContainerSession,
     ConversionPlan,
     DumpFormat,
     DumpManifest,
@@ -221,6 +222,8 @@ def save_manifest(path: Path, manifest: DumpManifest) -> None:
         "version": manifest.version,
         "dump_format": manifest.dump_format.value,
         "dump_paths": list(manifest.dump_paths),
+        "oracle_image": manifest.oracle_image,
+        "container_runtime": manifest.container_runtime,
         "tables": [table_metadata_to_dict(table) for table in manifest.tables],
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -241,6 +244,8 @@ def load_manifest(path: Path) -> DumpManifest:
         version=int(data.get("version", 1)),
         dump_format=DumpFormat(raw_format),
         dump_paths=tuple(data.get("dump_paths", [])),
+        oracle_image=str(data.get("oracle_image") or ""),
+        container_runtime=str(data.get("container_runtime") or ""),
         tables=tuple(table_metadata_from_dict(table) for table in data.get("tables", [])),
     )
 
@@ -260,6 +265,7 @@ def save_plan(path: Path, plan: ConversionPlan) -> None:
         "dump_format": plan.dump_format.value,
         "dump_paths": list(plan.dump_paths),
         "oracle_image": plan.oracle_image,
+        "container_runtime": plan.container_runtime,
         "tables": [table_plan_to_dict(table_plan) for table_plan in plan.tables],
     }
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
@@ -281,5 +287,53 @@ def load_plan(path: Path) -> ConversionPlan:
         dump_format=DumpFormat(raw_format),
         dump_paths=tuple(data.get("dump_paths", [])),
         oracle_image=str(data["oracle_image"]),
+        container_runtime=str(data.get("container_runtime") or "docker"),
         tables=tuple(table_plan_from_dict(plan) for plan in data.get("tables", [])),
+    )
+
+
+def save_session(path: Path, session: ContainerSession) -> None:
+    """Write a :class:`~oracle_dmp_converter.models.ContainerSession` to a JSON file.
+
+    Creates parent directories as needed.  The Oracle password is deliberately
+    excluded; it is recovered from the running container's environment when
+    reconnecting via :meth:`~oracle_dmp_converter.docker_oracle.DockerOracle.reconnect`.
+
+    Args:
+        path: Destination file path (conventionally ``session.json``).
+        session: Session to serialise.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": session.version,
+        "container_name": session.container_name,
+        "container_runtime": session.container_runtime,
+        "oracle_image": session.oracle_image,
+        "oracle_service": session.oracle_service,
+        "work_dir": session.work_dir,
+        "dump_dir": session.dump_dir,
+        "created_at": session.created_at,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def load_session(path: Path) -> ContainerSession:
+    """Load a :class:`~oracle_dmp_converter.models.ContainerSession` from a JSON file.
+
+    Args:
+        path: Path to the ``session.json`` file.
+
+    Returns:
+        Deserialised :class:`~oracle_dmp_converter.models.ContainerSession`.
+    """
+    data = json.loads(path.read_text())
+    return ContainerSession(
+        version=int(data.get("version", 1)),
+        container_name=str(data["container_name"]),
+        container_runtime=str(data["container_runtime"]),
+        oracle_image=str(data.get("oracle_image") or ""),
+        oracle_service=str(data.get("oracle_service") or "FREEPDB1"),
+        work_dir=str(data.get("work_dir") or ""),
+        dump_dir=str(data.get("dump_dir") or ""),
+        created_at=str(data.get("created_at") or ""),
     )

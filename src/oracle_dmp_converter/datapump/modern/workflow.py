@@ -177,6 +177,6 @@ def make_modern_runners(
       and handles data-importing operations.
     """
     discovery_runner = DataPumpRunner(container, work_dir / "discovery" / "parfiles")  # type: ignore[arg-type]
-    inspect_runner   = DataPumpRunner(container, work_dir / "inspect"   / "parfiles")  # type: ignore[arg-type]
-    convert_runner   = DataPumpRunner(container, work_dir / "convert"   / "parfiles")  # type: ignore[arg-type]
+    inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")  # type: ignore[arg-type]
+    convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")  # type: ignore[arg-type]
     return discovery_runner, inspect_runner, convert_runner

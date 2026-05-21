@@ -60,7 +60,9 @@ def plan_table(
     if override and override.strategy is not None:
         LOGGER.debug(
             "%s.%s: strategy=unsupported (unrecognised config override %r)",
-            table.schema, table.name, override.strategy,
+            table.schema,
+            table.name,
+            override.strategy,
         )
         return TablePlan(
             schema=table.schema,
@@ -75,7 +77,8 @@ def plan_table(
     if dump_format == DumpFormat.LEGACY or not table.partitions:
         LOGGER.debug(
             "%s.%s: strategy=whole (%s)",
-            table.schema, table.name,
+            table.schema,
+            table.name,
             "legacy dump format" if dump_format == DumpFormat.LEGACY else "no partitions",
         )
         return TablePlan(

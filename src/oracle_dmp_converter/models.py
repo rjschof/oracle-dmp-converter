@@ -234,12 +234,50 @@ class DumpManifest:
         tables: Metadata for every discoverable table in the dump.
         version: Manifest schema version; currently always ``1``.
         dump_format: Whether the dump is a modern Data Pump or legacy exp dump.
+        oracle_image: Docker image tag used for the Oracle Free staging
+            container during inspect.  Empty string when not recorded (e.g.
+            manifests produced by older versions of the tool).
+        container_runtime: Container runtime (``"docker"`` or ``"podman"``)
+            used during inspect.  Empty string when not recorded.
     """
 
     dump_paths: tuple[str, ...]
     tables: tuple[TableMetadata, ...]
     version: int = 1
     dump_format: DumpFormat = DumpFormat.DATAPUMP
+    oracle_image: str = ""
+    container_runtime: str = ""
+
+
+@dataclass(frozen=True)
+class ContainerSession:
+    """Active container session written by ``inspect`` for reuse by ``convert``.
+
+    Serialised to ``session.json`` in the work directory.  The Oracle password
+    is intentionally omitted — it is read back from the running container's
+    environment via ``docker inspect`` when reconnecting.
+
+    Attributes:
+        container_name: Docker/Podman container name used to reconnect.
+        container_runtime: Container runtime CLI (``"docker"`` or ``"podman"``).
+        oracle_image: Docker image tag that was used to start the container.
+        oracle_service: Oracle PDB service name (e.g. ``"FREEPDB1"``).
+        work_dir: Absolute path to the host-side working directory.
+        dump_dir: Absolute path to the host-side dump directory that is
+            bind-mounted at :data:`~oracle_dmp_converter.cli.DEFAULT_CONTAINER_DUMP_PATH`
+            inside the container.
+        version: Session schema version; currently always ``1``.
+        created_at: ISO 8601 timestamp of when the session was created.
+    """
+
+    container_name: str
+    container_runtime: str
+    oracle_image: str
+    oracle_service: str
+    work_dir: str
+    dump_dir: str
+    version: int = 1
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -256,6 +294,9 @@ class ConversionPlan:
             container.
         version: Plan schema version; currently always ``1``.
         dump_format: Whether the dump is a modern Data Pump or legacy exp dump.
+        container_runtime: Container runtime (``"docker"`` or ``"podman"``)
+            recorded at plan time.  Defaults to ``"docker"`` for plans
+            produced by older versions of the tool.
     """
 
     dump_paths: tuple[str, ...]
@@ -263,3 +304,4 @@ class ConversionPlan:
     oracle_image: str
     version: int = 1
     dump_format: DumpFormat = DumpFormat.DATAPUMP
+    container_runtime: str = "docker"

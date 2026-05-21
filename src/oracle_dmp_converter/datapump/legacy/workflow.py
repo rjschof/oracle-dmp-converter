@@ -183,7 +183,10 @@ class LegacyDumpWorkflow(DumpWorkflow):
         """
         LOGGER.debug(
             "Importing legacy chunk %s for %s.%s -> %s",
-            chunk_name, source_schema, table, stage_schema,
+            chunk_name,
+            source_schema,
+            table,
+            stage_schema,
         )
         job = LegacyImportJob(
             connection=self._credentials,
@@ -216,6 +219,6 @@ def make_legacy_runners(
       and handles data-importing operations.
     """
     discovery_runner = LegacyRunner(container, work_dir / "discovery" / "parfiles")  # type: ignore[arg-type]
-    inspect_runner   = LegacyRunner(container, work_dir / "inspect"   / "parfiles")  # type: ignore[arg-type]
-    convert_runner   = LegacyRunner(container, work_dir / "convert"   / "parfiles")  # type: ignore[arg-type]
+    inspect_runner = LegacyRunner(container, work_dir / "inspect" / "parfiles")  # type: ignore[arg-type]
+    convert_runner = LegacyRunner(container, work_dir / "convert" / "parfiles")  # type: ignore[arg-type]
     return discovery_runner, inspect_runner, convert_runner

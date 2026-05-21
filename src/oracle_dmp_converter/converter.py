@@ -317,9 +317,7 @@ class OracleDumpConverter:
                 :meth:`use_format` has been called.
         """
         if self._workflow is None:
-            raise RuntimeError(
-                "No workflow active; call inspect_dump() or use_format() first"
-            )
+            raise RuntimeError("No workflow active; call inspect_dump() or use_format() first")
         return self._workflow
 
     # ------------------------------------------------------------------
@@ -427,7 +425,11 @@ class OracleDumpConverter:
             stage_schema = self._stage_schema_for(source_schema)
             LOGGER.info(
                 "Inspecting table %d/%d: %s.%s (staging -> %s)",
-                i, total, source_schema, table, stage_schema,
+                i,
+                total,
+                source_schema,
+                table,
+                stage_schema,
             )
             self._metadata_import_table(source_schema, table)
             try:

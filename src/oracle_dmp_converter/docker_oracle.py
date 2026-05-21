@@ -208,6 +208,7 @@ class DockerOracle:
         runtime: Container runtime CLI (``"docker"`` or ``"podman"``).
         started: ``True`` once :meth:`_start_container` has succeeded.
     """
+
     image: str = DEFAULT_ORACLE_IMAGE
     password: str = "OraclePwd_123"
     service: str = "FREEPDB1"
@@ -273,6 +274,93 @@ class DockerOracle:
         )
         container._start_container()
         return container
+
+    @classmethod
+    def reconnect(
+        cls,
+        *,
+        name: str,
+        image: str = "",
+        service: str = "FREEPDB1",
+        runtime: str | None = None,
+    ) -> DockerOracle:
+        """Reconnect to an already-running Oracle container by name.
+
+        Looks up the container in the Docker/Podman daemon, verifies it is
+        still running, and reads the ``ORACLE_PASSWORD`` back from the
+        container's environment so the caller does not need to supply it.
+
+        Use this after loading a :class:`~oracle_dmp_converter.models.ContainerSession`
+        written by a previous ``inspect`` run.  The returned instance behaves
+        exactly like one returned by :meth:`start` — in particular,
+        :meth:`stop` will stop (and auto-remove) the container.
+
+        Args:
+            name: Container name as recorded in ``session.json``.
+            image: Docker image tag recorded in the session.  Used to populate
+                :attr:`image` on the returned instance; not used to pull or
+                create anything.
+            service: Oracle PDB service name (default ``"FREEPDB1"``).
+            runtime: Container runtime CLI override; falls back to
+                ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
+
+        Returns:
+            A :class:`DockerOracle` instance with :attr:`started` set to
+            ``True`` and :attr:`password` populated from the container env.
+
+        Raises:
+            :class:`~oracle_dmp_converter.errors.DockerContainerError`: If the
+                container cannot be found or is not currently running.
+            :class:`~oracle_dmp_converter.errors.DockerError`: If the
+                Docker/Podman daemon cannot be reached.
+        """
+        effective_runtime = runtime or os.environ.get(
+            "ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME
+        )
+        client = _docker_client(effective_runtime)
+        try:
+            existing = client.containers.get(name)
+        except NotFound as exc:
+            raise DockerContainerError(
+                f"Session container {name!r} not found — "
+                "the container may have exited since inspect was run"
+            ) from exc
+        except (APIError, DockerException) as exc:
+            raise DockerContainerError(str(exc)) from exc
+
+        try:
+            existing.reload()
+            state = existing.attrs.get("State", {})
+        except (APIError, DockerException) as exc:
+            raise DockerContainerError(str(exc)) from exc
+
+        if not state.get("Running"):
+            raise DockerContainerError(
+                f"Session container {name!r} exists but is not running "
+                f"(status={state.get('Status', 'unknown')!r})"
+            )
+
+        # Recover the Oracle password from the container's own environment so
+        # callers do not need to pass it separately.
+        password = ""
+        env_list = existing.attrs.get("Config", {}).get("Env") or []
+        for item in env_list:
+            if item.startswith("ORACLE_PASSWORD="):
+                password = item[len("ORACLE_PASSWORD=") :]
+                break
+
+        instance = cls(
+            image=image,
+            password=password,
+            service=service,
+            name=name,
+            runtime=effective_runtime,
+        )
+        instance._client = client
+        instance._container = existing
+        instance.started = True
+        LOGGER.info("Reconnected to Oracle container %s", name)
+        return instance
 
     def _start_container(self) -> None:
         """Pull the image and start the container.

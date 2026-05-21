@@ -54,6 +54,9 @@ class ConverterConfig:
 
     Attributes:
         oracle_image: Docker image tag for the Oracle Free staging container.
+            ``None`` when not explicitly set in the config file; the caller
+            should fall back to :data:`DEFAULT_ORACLE_IMAGE` or a value from
+            the inspection manifest.
         tables: Mapping from ``"SCHEMA.TABLE"`` keys to
             :class:`TableOverride` instances.  Lookups are tried first
             case-exact, then upper-cased.
@@ -62,7 +65,7 @@ class ConverterConfig:
             semantics as ``tables``.
     """
 
-    oracle_image: str = DEFAULT_ORACLE_IMAGE
+    oracle_image: str | None = None
     tables: dict[str, TableOverride] = field(default_factory=dict)
     columns: dict[str, ColumnOverride] = field(default_factory=dict)
 
@@ -91,7 +94,7 @@ def load_config(path: Path | None) -> ConverterConfig:
         name: ColumnOverride(**(value or {})) for name, value in (data.get("columns") or {}).items()
     }
     return ConverterConfig(
-        oracle_image=oracle.get("image", DEFAULT_ORACLE_IMAGE),
+        oracle_image=oracle.get("image"),
         tables=tables,
         columns=columns,
     )
@@ -155,7 +158,7 @@ def dump_config(config: ConverterConfig) -> dict[str, Any]:
     """
     return {
         "oracle": {
-            "image": config.oracle_image,
+            "image": config.oracle_image or DEFAULT_ORACLE_IMAGE,
         },
         "tables": {name: vars(value) for name, value in config.tables.items()},
         "columns": {name: vars(value) for name, value in config.columns.items()},

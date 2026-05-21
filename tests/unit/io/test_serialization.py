@@ -1,9 +1,17 @@
 from pathlib import Path
 
-from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
+from oracle_dmp_converter.io.serialization import (
+    load_manifest,
+    load_plan,
+    load_session,
+    save_manifest,
+    save_plan,
+    save_session,
+)
 from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
+    ContainerSession,
     ConversionPlan,
     DumpFormat,
     DumpManifest,
@@ -16,6 +24,8 @@ from oracle_dmp_converter.models import (
 def test_manifest_round_trip(tmp_path: Path) -> None:
     manifest = DumpManifest(
         dump_paths=("/tmp/full.dmp",),
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        container_runtime="docker",
         tables=(
             TableMetadata(
                 schema="SRC",
@@ -37,6 +47,8 @@ def test_manifest_round_trip_legacy_format(tmp_path: Path) -> None:
     manifest = DumpManifest(
         dump_paths=("/tmp/legacy.dmp",),
         dump_format=DumpFormat.LEGACY,
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        container_runtime="podman",
         tables=(
             TableMetadata(
                 schema="SRC",
@@ -52,12 +64,31 @@ def test_manifest_round_trip_legacy_format(tmp_path: Path) -> None:
     loaded = load_manifest(path)
     assert loaded == manifest
     assert loaded.dump_format == DumpFormat.LEGACY
+    assert loaded.container_runtime == "podman"
+
+
+def test_manifest_round_trip_missing_runtime_fields(tmp_path: Path) -> None:
+    """Old manifest.json files without oracle_image/container_runtime load with empty defaults."""
+    import json
+
+    payload = {
+        "version": 1,
+        "dump_format": "datapump",
+        "dump_paths": ["/tmp/old.dmp"],
+        "tables": [],
+    }
+    path = tmp_path / "old_manifest.json"
+    path.write_text(json.dumps(payload) + "\n")
+    loaded = load_manifest(path)
+    assert loaded.oracle_image == ""
+    assert loaded.container_runtime == ""
 
 
 def test_plan_round_trip(tmp_path: Path) -> None:
     plan = ConversionPlan(
         dump_paths=("/tmp/full.dmp",),
         oracle_image="gvenzl/oracle-free:23-faststart",
+        container_runtime="docker",
         tables=(
             TablePlan(
                 schema="SRC",
@@ -82,6 +113,7 @@ def test_plan_round_trip_with_partitions(tmp_path: Path) -> None:
     plan = ConversionPlan(
         dump_paths=("/tmp/full.dmp",),
         oracle_image="gvenzl/oracle-free:23-faststart",
+        container_runtime="podman",
         tables=(
             TablePlan(
                 schema="SRC",
@@ -106,6 +138,7 @@ def test_plan_round_trip_with_partitions(tmp_path: Path) -> None:
     save_plan(path, plan)
     loaded = load_plan(path)
     assert loaded == plan
+    assert loaded.container_runtime == "podman"
 
 
 def test_plan_round_trip_legacy_format(tmp_path: Path) -> None:
@@ -113,6 +146,7 @@ def test_plan_round_trip_legacy_format(tmp_path: Path) -> None:
         dump_paths=("/tmp/legacy.dmp",),
         oracle_image="gvenzl/oracle-free:23-faststart",
         dump_format=DumpFormat.LEGACY,
+        container_runtime="docker",
         tables=(
             TablePlan(
                 schema="SRC",
@@ -132,3 +166,91 @@ def test_plan_round_trip_legacy_format(tmp_path: Path) -> None:
     loaded = load_plan(path)
     assert loaded == plan
     assert loaded.dump_format == DumpFormat.LEGACY
+
+
+def test_plan_round_trip_missing_container_runtime(tmp_path: Path) -> None:
+    """Old plan.yaml files without container_runtime load with 'docker' default."""
+    import yaml
+
+    payload = {
+        "version": 1,
+        "dump_format": "datapump",
+        "dump_paths": ["/tmp/old.dmp"],
+        "oracle_image": "gvenzl/oracle-free:23-faststart",
+        "tables": [],
+    }
+    path = tmp_path / "old_plan.yaml"
+    path.write_text(yaml.safe_dump(payload))
+    loaded = load_plan(path)
+    assert loaded.container_runtime == "docker"
+
+
+def test_session_round_trip(tmp_path: Path) -> None:
+    session = ContainerSession(
+        container_name="oracle-dmp-converter-abc123def456",
+        container_runtime="docker",
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        oracle_service="FREEPDB1",
+        work_dir="/tmp/work",
+        dump_dir="/tmp/dumps",
+        created_at="2026-05-20T14:30:00+00:00",
+    )
+    path = tmp_path / "session.json"
+    save_session(path, session)
+    loaded = load_session(path)
+    assert loaded == session
+
+
+def test_session_round_trip_podman(tmp_path: Path) -> None:
+    session = ContainerSession(
+        container_name="oracle-dmp-converter-deadbeef0000",
+        container_runtime="podman",
+        oracle_image="gvenzl/oracle-free:21-faststart",
+        oracle_service="FREEPDB1",
+        work_dir="/home/user/work",
+        dump_dir="/home/user/dumps",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    path = tmp_path / "session_podman.json"
+    save_session(path, session)
+    loaded = load_session(path)
+    assert loaded.container_runtime == "podman"
+    assert loaded.oracle_image == "gvenzl/oracle-free:21-faststart"
+    assert loaded == session
+
+
+def test_session_creates_parent_dirs(tmp_path: Path) -> None:
+    session = ContainerSession(
+        container_name="oracle-dmp-converter-abc",
+        container_runtime="docker",
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        oracle_service="FREEPDB1",
+        work_dir=str(tmp_path),
+        dump_dir="/tmp/dumps",
+        created_at="2026-05-20T12:00:00+00:00",
+    )
+    path = tmp_path / "nested" / "deep" / "session.json"
+    save_session(path, session)
+    assert path.exists()
+    loaded = load_session(path)
+    assert loaded == session
+
+
+def test_session_missing_optional_fields(tmp_path: Path) -> None:
+    """session.json files with missing optional fields use safe defaults."""
+    import json
+
+    payload = {
+        "version": 1,
+        "container_name": "oracle-dmp-converter-mintest",
+        "container_runtime": "docker",
+    }
+    path = tmp_path / "minimal_session.json"
+    path.write_text(json.dumps(payload) + "\n")
+    loaded = load_session(path)
+    assert loaded.oracle_image == ""
+    assert loaded.oracle_service == "FREEPDB1"
+    assert loaded.work_dir == ""
+    assert loaded.dump_dir == ""
+    assert loaded.created_at == ""
+    assert loaded.container_name == "oracle-dmp-converter-mintest"

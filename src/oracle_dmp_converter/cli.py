@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -16,9 +17,16 @@ from oracle_dmp_converter.docker_oracle import (
     DockerOracle,
     docker_available,
 )
-from oracle_dmp_converter.io.serialization import load_manifest, load_plan, save_manifest, save_plan
+from oracle_dmp_converter.io.serialization import (
+    load_manifest,
+    load_plan,
+    load_session,
+    save_manifest,
+    save_plan,
+    save_session,
+)
 from oracle_dmp_converter.io.state import StateStore
-from oracle_dmp_converter.models import ConversionPlan, OutputFormat
+from oracle_dmp_converter.models import ContainerSession, ConversionPlan, OutputFormat
 from oracle_dmp_converter.oracle.conn import create_directory, oracle_connection
 from oracle_dmp_converter.planner import plan_tables
 
@@ -26,6 +34,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DUMP_DIRECTORY = "ORACLE_DMC_DUMP"
 DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
+SESSION_FILENAME = "session.json"
 
 
 def _default_runtime() -> str:
@@ -196,6 +205,33 @@ def _build_converter(
     )
 
 
+def _cleanup_stale_session(session_path: Path) -> None:
+    """Stop the container recorded in *session_path* and delete the file.
+
+    Silently ignores errors so that callers can always proceed even when the
+    container has already exited or the session file is malformed.
+
+    Args:
+        session_path: Path to an existing ``session.json`` file.
+    """
+    try:
+        session = load_session(session_path)
+        stale = DockerOracle.reconnect(
+            name=session.container_name,
+            image=session.oracle_image,
+            service=session.oracle_service,
+            runtime=session.container_runtime,
+        )
+        stale.stop()
+        LOGGER.info("Stopped stale session container %s", session.container_name)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("Could not stop stale session container: %s", exc)
+    try:
+        session_path.unlink()
+    except OSError:
+        pass
+
+
 @main.command()
 @click.option(
     "--dump",
@@ -240,13 +276,23 @@ def inspect(
     """Inspect a full Data Pump dump and write a manifest."""
 
     dump_dir, dumpfiles = _validate_dump_paths(dump_paths)
+
+    session_path = work_dir / SESSION_FILENAME
+    if session_path.exists():
+        LOGGER.warning(
+            "Existing session found at %s — stopping stale container and overwriting",
+            session_path,
+        )
+        _cleanup_stale_session(session_path)
+
     LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", oracle_image, dump_dir)
-    with DockerOracle.start(
+    container = DockerOracle.start(
         image=oracle_image,
         password=oracle_password,
         mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
         runtime=container_runtime,
-    ) as container:
+    )
+    try:
         LOGGER.info("Oracle container %s started; waiting for readiness", container.name)
         container.wait_ready()
         LOGGER.info("Oracle container %s is ready", container.name)
@@ -268,11 +314,32 @@ def inspect(
         manifest = replace(
             manifest,
             dump_paths=tuple(str(path.resolve()) for path in dump_paths),
+            oracle_image=oracle_image,
+            container_runtime=container_runtime,
         )
         if manifest_path is None:
             manifest_path = work_dir / "manifest.json"
         save_manifest(manifest_path, manifest)
         LOGGER.info("Wrote manifest with %d tables: %s", len(manifest.tables), manifest_path)
+
+        session = ContainerSession(
+            container_name=container.name,
+            container_runtime=container_runtime,
+            oracle_image=oracle_image,
+            oracle_service=container.service,
+            work_dir=str(work_dir.resolve()),
+            dump_dir=str(dump_dir),
+            created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+        save_session(session_path, session)
+        LOGGER.info(
+            "Session saved to %s — container %s is still running for reuse by 'convert'",
+            session_path,
+            container.name,
+        )
+    except Exception:
+        container.stop()
+        raise
 
 
 @main.command("plan")
@@ -284,6 +351,14 @@ def inspect(
 )
 @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
+    "--oracle-image",
+    default=None,
+    help=(
+        "Override the oracle_image for this plan.  Required when the manifest and "
+        "config file disagree on oracle_image."
+    ),
+)
+@click.option(
     "--output",
     "plan_path",
     type=click.Path(path_type=Path),
@@ -293,6 +368,7 @@ def inspect(
 def plan_command(
     manifest_path: Path,
     config_path: Path | None,
+    oracle_image: str | None,
     plan_path: Path | None,
 ) -> None:
     """Build a conversion plan from an inspection manifest."""
@@ -304,11 +380,29 @@ def plan_command(
     manifest = load_manifest(manifest_path)
     config = load_config(config_path)
     LOGGER.info("Planning %d tables (format=%s)", len(manifest.tables), manifest.dump_format.value)
+
+    if oracle_image is None:
+        if (
+            manifest.oracle_image
+            and config.oracle_image is not None
+            and manifest.oracle_image != config.oracle_image
+        ):
+            raise click.ClickException(
+                f"oracle_image mismatch: manifest has {manifest.oracle_image!r} but "
+                f"config has {config.oracle_image!r}. "
+                "Pass --oracle-image to select one, update config.yaml to match, "
+                "or remove oracle_image from manifest.json."
+            )
+        effective_image = config.oracle_image or manifest.oracle_image or DEFAULT_ORACLE_IMAGE
+    else:
+        effective_image = oracle_image
+
     table_plans = plan_tables(manifest.tables, config, dump_format=manifest.dump_format)
     plan = ConversionPlan(
         dump_paths=manifest.dump_paths,
         tables=table_plans,
-        oracle_image=config.oracle_image,
+        oracle_image=effective_image,
+        container_runtime=manifest.container_runtime or DEFAULT_CONTAINER_RUNTIME,
         dump_format=manifest.dump_format,
     )
     save_plan(plan_path, plan)
@@ -353,9 +447,23 @@ def plan_command(
 @click.option("--oracle-password", default="OraclePwd_123", show_default=True)
 @click.option(
     "--container-runtime",
-    default=_default_runtime,
+    default=None,
     show_default="docker",
-    help="Container runtime to use (docker or podman).",
+    help=(
+        "Container runtime to use (docker or podman). "
+        "Defaults to the value in the plan, the "
+        "ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME env var, or 'docker'."
+    ),
+)
+@click.option(
+    "--keep-alive",
+    is_flag=True,
+    default=False,
+    help=(
+        "Keep the Oracle container running after conversion completes and "
+        "preserve session.json for diagnostic purposes or re-use. "
+        "By default the container is stopped and session.json is deleted."
+    ),
 )
 def convert(
     plan_path: Path | None,
@@ -366,7 +474,8 @@ def convert(
     work_dir: Path | None,
     oracle_image: str,
     oracle_password: str,
-    container_runtime: str,
+    container_runtime: str | None,
+    keep_alive: bool,
 ) -> None:
     """Convert all tables in a plan, or inspect/plan/convert in one command."""
 
@@ -382,22 +491,47 @@ def convert(
     else:
         resolved_dump_paths = _dump_paths_or_plan_dump_paths(dump_paths)
         plan = None
-        oracle_image = config.oracle_image if oracle_image == DEFAULT_ORACLE_IMAGE else oracle_image
+        if oracle_image == DEFAULT_ORACLE_IMAGE and config.oracle_image is not None:
+            oracle_image = config.oracle_image
+
+    # Resolve the effective container runtime: explicit CLI > plan value > env/default
+    effective_runtime = (
+        container_runtime or (plan.container_runtime if plan else None) or _default_runtime()
+    )
 
     dump_dir, dumpfiles = _validate_dump_paths(resolved_dump_paths)
     image = plan.oracle_image if plan else oracle_image
 
-    LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", image, dump_dir)
-    with DockerOracle.start(
-        image=image,
-        password=oracle_password,
-        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
-        runtime=container_runtime,
-    ) as container:
+    # Auto-detect a session written by a prior 'inspect' run.
+    session_path = work_dir / SESSION_FILENAME
+    session = load_session(session_path) if session_path.exists() else None
+
+    if session is not None:
+        LOGGER.info(
+            "Found session at %s — reconnecting to container %s",
+            session_path,
+            session.container_name,
+        )
+        container = DockerOracle.reconnect(
+            name=session.container_name,
+            image=session.oracle_image or image,
+            service=session.oracle_service,
+            runtime=effective_runtime,
+        )
+    else:
+        LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", image, dump_dir)
+        container = DockerOracle.start(
+            image=image,
+            password=oracle_password,
+            mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+            runtime=effective_runtime,
+        )
+
+    try:
         LOGGER.info("Oracle container %s started; waiting for readiness", container.name)
         container.wait_ready()
         LOGGER.info("Oracle container %s is ready", container.name)
-        admin = _admin_for_container(container, oracle_password)
+        admin = _admin_for_container(container, container.password)
         LOGGER.info(
             "Creating dump directory object %s -> %s",
             DEFAULT_DUMP_DIRECTORY,
@@ -415,10 +549,17 @@ def convert(
         if plan is None:
             LOGGER.info("No plan provided; running inspect + plan inline")
             manifest = converter.inspect_dump()
-            plan = ConversionPlan(
+            manifest = replace(
+                manifest,
                 dump_paths=tuple(str(path) for path in resolved_dump_paths),
+                oracle_image=image,
+                container_runtime=effective_runtime,
+            )
+            plan = ConversionPlan(
+                dump_paths=manifest.dump_paths,
                 tables=plan_tables(manifest.tables, config, dump_format=manifest.dump_format),
                 oracle_image=image,
+                container_runtime=effective_runtime,
                 dump_format=manifest.dump_format,
             )
             save_manifest(work_dir / "manifest.json", manifest)
@@ -441,3 +582,28 @@ def convert(
             len(result.tables),
             output_dir,
         )
+    finally:
+        if keep_alive:
+            if session is None:
+                # Fresh container started by this convert run — write a session
+                # so it can be reused or inspected later.
+                new_session = ContainerSession(
+                    container_name=container.name,
+                    container_runtime=effective_runtime,
+                    oracle_image=image,
+                    oracle_service=container.service,
+                    work_dir=str(work_dir.resolve()),
+                    dump_dir=str(dump_dir),
+                    created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+                )
+                save_session(session_path, new_session)
+            LOGGER.info(
+                "Container %s kept alive (--keep-alive); session at %s",
+                container.name,
+                session_path,
+            )
+        else:
+            container.stop()
+            if session_path.exists():
+                session_path.unlink()
+                LOGGER.debug("Deleted session file %s", session_path)
