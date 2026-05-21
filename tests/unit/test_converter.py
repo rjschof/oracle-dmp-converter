@@ -160,7 +160,6 @@ def test_convert_plan_skips_unsupported_tables(tmp_path: Path) -> None:
     with (
         patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
         patch("oracle_dmp_converter.converter.ensure_schema"),
-        patch("oracle_dmp_converter.converter.drop_table"),
         patch(
             "oracle_dmp_converter.converter.discover_table_metadata",
             return_value=fake_metadata,

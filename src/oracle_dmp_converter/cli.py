@@ -570,6 +570,14 @@ def convert(
                 work_dir,
             )
         else:
+            if session is None:
+                raise click.UsageError(
+                    "A plan was provided but no active inspect session was found "
+                    f"({session_path} does not exist).\n"
+                    "The staging schema must be prepared by 'inspect' before 'convert --plan' "
+                    "can run data-only imports.\n"
+                    "Run 'inspect' first, then re-run 'convert --plan'."
+                )
             converter.use_format(plan.dump_format)
         state_store = StateStore(work_dir / "convert" / "state.sqlite")
         try:

@@ -37,11 +37,11 @@ from oracle_dmp_converter.oracle.conn import (
     OracleCredentials,
     count_rows,
     drop_schema,
-    drop_table,
     ensure_schema,
     ensure_tablespace,
     grant_quota_unlimited,
     oracle_connection,
+    truncate_table,
 )
 from oracle_dmp_converter.oracle.exporter import export_table
 from oracle_dmp_converter.oracle.identifiers import filesystem_safe_identifier
@@ -379,20 +379,6 @@ class OracleDumpConverter:
         with self._connect() as conn:
             drop_schema(conn, stage_schema)
 
-    def drop_stage_table(self, source_schema: str, table: str) -> None:
-        """Drop a single table from the staging schema.
-
-        Used to clean up after each chunk import so the next import starts
-        with an empty target.
-
-        Args:
-            source_schema: Original Oracle schema name.
-            table: Table name to drop from the ``DMP_<source_schema>`` schema.
-        """
-        stage_schema = self._stage_schema_for(source_schema)
-        with self._connect() as conn:
-            drop_table(conn, stage_schema, table)
-
     # ------------------------------------------------------------------
     # Inspect
     # ------------------------------------------------------------------
@@ -400,8 +386,11 @@ class OracleDumpConverter:
     def _metadata_import_table(self, source_schema: str, table: str) -> None:
         """Import a single table's DDL into the staging schema for inspection.
 
-        Ensures the staging schema exists, drops any existing copy of *table*,
-        then delegates to the workflow's metadata-only import.
+        Ensures the staging schema exists, then delegates to the workflow's
+        metadata-only import.  The workflow uses ``TABLE_EXISTS_ACTION=REPLACE``
+        so re-running inspect against an already-prepared schema is safe.
+        The imported table is left in place so that conversion can use
+        ``TABLE_EXISTS_ACTION=TRUNCATE`` / ``CONTENT=DATA_ONLY`` imports.
 
         Args:
             source_schema: Original Oracle schema name from the dump.
@@ -409,8 +398,6 @@ class OracleDumpConverter:
         """
         stage_schema = self._stage_schema_for(source_schema)
         self.prepare_stage_schema(source_schema)
-        with self._connect() as conn:
-            drop_table(conn, stage_schema, table)
         self._require_workflow().import_metadata(source_schema, stage_schema, table)
 
     def inspect_dump(self) -> DumpManifest:
@@ -432,23 +419,20 @@ class OracleDumpConverter:
                 stage_schema,
             )
             self._metadata_import_table(source_schema, table)
-            try:
-                with self._connect() as conn:
-                    metadata = discover_table_metadata(conn, stage_schema, table)
-                tables.append(
-                    TableMetadata(
-                        schema=source_schema,
-                        name=table,
-                        columns=metadata.columns,
-                        estimated_bytes=metadata.estimated_bytes,
-                        row_count=metadata.row_count,
-                        partitions=metadata.partitions,
-                        primary_key=metadata.primary_key,
-                        unique_keys=metadata.unique_keys,
-                    )
+            with self._connect() as conn:
+                metadata = discover_table_metadata(conn, stage_schema, table)
+            tables.append(
+                TableMetadata(
+                    schema=source_schema,
+                    name=table,
+                    columns=metadata.columns,
+                    estimated_bytes=metadata.estimated_bytes,
+                    row_count=metadata.row_count,
+                    partitions=metadata.partitions,
+                    primary_key=metadata.primary_key,
+                    unique_keys=metadata.unique_keys,
                 )
-            finally:
-                self.drop_stage_table(source_schema, table)
+            )
         return DumpManifest(
             dump_paths=self.dumpfiles,
             tables=tuple(tables),
@@ -469,8 +453,16 @@ class OracleDumpConverter:
     ) -> int:
         """Import one chunk of *table* into the staging schema.
 
-        Drops any existing copy of the table, delegates the import to the
-        active workflow, then returns the row count.
+        The staging schema is assumed to be pre-populated with DDL from the
+        inspect phase.
+
+        For modern Data Pump dumps the workflow issues
+        ``TABLE_EXISTS_ACTION=TRUNCATE CONTENT=DATA_ONLY``, so the import
+        tool itself clears the previous rows before loading the new chunk.
+
+        For legacy ``imp`` dumps (which have no ``TABLE_EXISTS_ACTION``), this
+        method issues a SQL ``TRUNCATE TABLE`` before delegating to the
+        workflow, which then runs ``imp ROWS=Y IGNORE=Y``.
 
         Args:
             source_schema: Original Oracle schema name.
@@ -484,10 +476,13 @@ class OracleDumpConverter:
             Number of rows present in the staging table after the import.
         """
         stage_schema = self._stage_schema_for(source_schema)
-        with self._connect() as conn:
-            drop_table(conn, stage_schema, table)
+        workflow = self._require_workflow()
 
-        self._require_workflow().import_chunk(
+        if workflow.dump_format == DumpFormat.LEGACY:
+            with self._connect() as conn:
+                truncate_table(conn, stage_schema, table)
+
+        workflow.import_chunk(
             source_schema=source_schema,
             stage_schema=stage_schema,
             table=table,
@@ -565,8 +560,9 @@ class OracleDumpConverter:
     ) -> ChunkConversionResult:
         """Import and export one :class:`~oracle_dmp_converter.models.ChunkPlan`.
 
-        Calls :meth:`import_table_chunk` followed by :meth:`export_stage_table`
-        and always cleans up the staging table on completion.
+        Calls :meth:`import_table_chunk` followed by :meth:`export_stage_table`.
+        The staging table is left in place after export so the next chunk can
+        reuse the pre-loaded DDL via ``TRUNCATE_TABLE`` / ``DATA_ONLY`` import.
 
         Args:
             table_plan: Parent table plan.
@@ -582,15 +578,12 @@ class OracleDumpConverter:
             chunk_name=chunk.name,
             partition_name=chunk.partition_name,
         )
-        try:
-            return self.export_stage_table(
-                source_schema=table_plan.schema,
-                table=table_plan.table,
-                chunk_name=chunk.name,
-                output_dir=output_dir,
-            )
-        finally:
-            self.drop_stage_table(table_plan.schema, table_plan.table)
+        return self.export_stage_table(
+            source_schema=table_plan.schema,
+            table=table_plan.table,
+            chunk_name=chunk.name,
+            output_dir=output_dir,
+        )
 
     def convert_table_plan(
         self,

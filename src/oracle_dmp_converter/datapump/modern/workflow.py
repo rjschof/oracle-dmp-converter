@@ -121,7 +121,11 @@ class DataPumpWorkflow(DumpWorkflow):
         return frozenset()
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
-        """Import table DDL only (``CONTENT=METADATA_ONLY``) into the staging schema."""
+        """Import table DDL only (``CONTENT=METADATA_ONLY``) into the staging schema.
+
+        Uses ``TABLE_EXISTS_ACTION=REPLACE`` so that re-running inspect against
+        an already-prepared staging schema re-creates the DDL cleanly.
+        """
         LOGGER.debug("Importing metadata for %s.%s -> %s", source_schema, table, stage_schema)
         job = ImportJob(
             connection=self._credentials,
@@ -132,6 +136,7 @@ class DataPumpWorkflow(DumpWorkflow):
             table=table,
             remap_schema=(source_schema, stage_schema),
             content="METADATA_ONLY",
+            table_exists_action="REPLACE",
             exclude=("INDEX", "REF_CONSTRAINT", "TRIGGER", "GRANT"),
         )
         self._inspect_runner.run_impdp(job)
@@ -144,7 +149,12 @@ class DataPumpWorkflow(DumpWorkflow):
         chunk_name: str,
         partition_name: str | None,
     ) -> None:
-        """Import one chunk of table data into the staging schema."""
+        """Import one chunk of table data into the staging schema.
+
+        Uses ``CONTENT=DATA_ONLY`` and ``TABLE_EXISTS_ACTION=TRUNCATE`` (the
+        ``ImportJob`` default) because the staging schema is pre-populated with
+        DDL during the inspect phase.
+        """
         LOGGER.debug(
             "Importing chunk %s for %s.%s -> %s", chunk_name, source_schema, table, stage_schema
         )
@@ -157,6 +167,7 @@ class DataPumpWorkflow(DumpWorkflow):
             table=table,
             remap_schema=(source_schema, stage_schema),
             partition_name=partition_name,
+            content="DATA_ONLY",
         )
         self._convert_runner.run_impdp(job)
 

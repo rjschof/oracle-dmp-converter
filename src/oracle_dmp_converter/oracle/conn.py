@@ -183,6 +183,24 @@ def drop_table(conn: oracledb.Connection, schema: str, table: str) -> None:
     execute_ignore(conn, f"DROP TABLE {oracle_qualified_name(schema, table)} PURGE", {942})
 
 
+def truncate_table(conn: oracledb.Connection, schema: str, table: str) -> None:
+    """Truncate all rows from a table, leaving the structure intact.
+
+    Unlike :func:`drop_table`, this preserves the table definition so that
+    subsequent data-only imports (``CONTENT=DATA_ONLY`` / ``ROWS=Y``) can
+    load directly without re-creating DDL.
+
+    Args:
+        conn: Active Oracle connection.
+        schema: Table owner.
+        table: Table name to truncate.
+    """
+    LOGGER.debug("Truncating table %s.%s", schema, table)
+    with conn.cursor() as cursor:
+        cursor.execute(f"TRUNCATE TABLE {oracle_qualified_name(schema, table)}")
+    conn.commit()
+
+
 def count_rows(conn: oracledb.Connection, schema: str, table: str) -> int:
     """Return the exact row count of a table via ``SELECT COUNT(*)``.
 

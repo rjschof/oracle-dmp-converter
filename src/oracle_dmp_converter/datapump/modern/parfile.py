@@ -32,7 +32,7 @@ class ImportJob:
     remap_schema: tuple[str, str] | None = None
     content: str | None = None
     partition_name: str | None = None
-    table_exists_action: str = "REPLACE"
+    table_exists_action: str = "TRUNCATE"
     exclude: tuple[str, ...] = field(
         default=("INDEX", "CONSTRAINT", "REF_CONSTRAINT", "TRIGGER", "STATISTICS", "GRANT")
     )
