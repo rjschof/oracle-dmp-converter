@@ -17,6 +17,7 @@ from oracle_dmp_converter.docker_oracle import (
     DockerOracle,
     docker_available,
 )
+from oracle_dmp_converter.io.report import build_conversion_report, save_conversion_report
 from oracle_dmp_converter.io.serialization import (
     load_manifest,
     load_plan,
@@ -654,6 +655,9 @@ def convert(
             len(result.tables),
             output_dir,
         )
+        report = build_conversion_report(plan, result, converter.output_format.value)
+        save_conversion_report(work_dir, report)
+        LOGGER.info("Wrote conversion report: %s", work_dir / "conversion_report.yaml")
     finally:
         if keep_alive:
             if session is None:

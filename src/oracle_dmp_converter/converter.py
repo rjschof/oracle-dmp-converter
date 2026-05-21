@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import oracledb
@@ -127,9 +128,13 @@ class PlanConversionResult:
 
     Attributes:
         tables: Results for each successfully converted table.
+        started_at: UTC datetime when :meth:`convert_plan` began.
+        completed_at: UTC datetime when :meth:`convert_plan` finished.
     """
 
     tables: tuple[TableConversionResult, ...]
+    started_at: datetime
+    completed_at: datetime
 
     @property
     def rows(self) -> int:
@@ -1097,6 +1102,7 @@ class OracleDumpConverter:
             else:
                 supported.append(table_plan)
 
+        plan_started_at = datetime.now(UTC)
         results: list[TableConversionResult] = []
         for batch_start in range(0, len(supported), TABLE_IMPORT_BATCH_SIZE):
             batch = supported[batch_start : batch_start + TABLE_IMPORT_BATCH_SIZE]
@@ -1116,4 +1122,9 @@ class OracleDumpConverter:
                     table_result.rows,
                 )
             results.extend(batch_results)
-        return PlanConversionResult(tables=tuple(results))
+        plan_completed_at = datetime.now(UTC)
+        return PlanConversionResult(
+            tables=tuple(results),
+            started_at=plan_started_at,
+            completed_at=plan_completed_at,
+        )

@@ -308,3 +308,95 @@ class ConversionPlan:
     version: int = 1
     dump_format: DumpFormat = DumpFormat.DATAPUMP
     container_runtime: str = "docker"
+
+
+# ---------------------------------------------------------------------------
+# Conversion report models
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConversionStatistics:
+    """Summary counts for a completed conversion run.
+
+    Attributes:
+        total_output_rows: Total rows written across all converted chunks.
+        tables_total: Total number of tables in the plan.
+        tables_converted: Number of tables successfully converted.
+        tables_skipped: Number of tables skipped due to unsupported strategy.
+    """
+
+    total_output_rows: int
+    tables_total: int
+    tables_converted: int
+    tables_skipped: int
+
+
+@dataclass(frozen=True)
+class ChunkReport:
+    """Report entry for a single successfully converted chunk.
+
+    Attributes:
+        schema: Oracle schema name.
+        table: Oracle table name.
+        chunk: Chunk identifier, e.g. ``"whole"`` or ``"partition-00001-P_NORTH"``.
+        strategy: Table-level strategy value, e.g. ``"whole_table"`` or ``"partition"``.
+        output_rows: Number of rows written to the output file.
+        output_path: Absolute path to the written output file.
+    """
+
+    schema: str
+    table: str
+    chunk: str
+    strategy: str
+    output_rows: int
+    output_path: str
+
+
+@dataclass(frozen=True)
+class SkippedTableReport:
+    """Report entry for a table skipped due to an unsupported strategy.
+
+    Attributes:
+        schema: Oracle schema name.
+        table: Oracle table name.
+        strategy: Always ``"unsupported"``.
+        reason: Human-readable explanation for why the table was skipped.
+    """
+
+    schema: str
+    table: str
+    strategy: str
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class ConversionReport:
+    """Full conversion report written at the end of a successful ``convert`` run.
+
+    Serialised to ``conversion_report.yaml`` and ``conversion_report.json``
+    in the work directory.
+
+    Attributes:
+        version: Report schema version; currently always ``1``.
+        generated_at: ISO 8601 UTC timestamp of when the report was generated.
+        started_at: ISO 8601 UTC timestamp of when the conversion began.
+        completed_at: ISO 8601 UTC timestamp of when the conversion finished.
+        dump_format: Dump file format, e.g. ``"datapump"`` or ``"legacy"``.
+        output_format: Output file format, e.g. ``"parquet"``, ``"avro"``, ``"csv"``.
+        dump_paths: Paths to the source ``.dmp`` files.
+        statistics: Aggregated row and table counts.
+        successful: One entry per successfully converted chunk.
+        skipped: One entry per skipped (unsupported) table.
+    """
+
+    version: int
+    generated_at: str
+    started_at: str
+    completed_at: str
+    dump_format: str
+    output_format: str
+    dump_paths: tuple[str, ...]
+    statistics: ConversionStatistics
+    successful: tuple[ChunkReport, ...]
+    skipped: tuple[SkippedTableReport, ...]
