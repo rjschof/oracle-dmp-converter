@@ -42,6 +42,7 @@ def column_to_dict(column: ColumnMetadata) -> dict[str, Any]:
         "data_precision": column.data_precision,
         "data_scale": column.data_scale,
         "char_length": column.char_length,
+        "char_used": column.char_used,
     }
 
 
@@ -62,6 +63,7 @@ def column_from_dict(data: dict[str, Any]) -> ColumnMetadata:
         data_precision=data.get("data_precision"),
         data_scale=data.get("data_scale"),
         char_length=data.get("char_length"),
+        char_used=data.get("char_used"),
     )
 
 

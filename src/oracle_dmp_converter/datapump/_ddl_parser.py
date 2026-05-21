@@ -28,3 +28,4 @@ def unescape_quoted_identifier(value: str) -> str:
     For example, ``"FOO""BAR"`` refers to the identifier ``FOO"BAR``.
     """
     return value.replace('""', '"')
+

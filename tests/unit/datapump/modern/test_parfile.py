@@ -1,8 +1,10 @@
 from oracle_dmp_converter.datapump.modern.parfile import (
     BatchImportJob,
+    BulkMetadataImportJob,
     ExportJob,
     ImportJob,
     render_batch_import_parfile,
+    render_bulk_metadata_import_parfile,
     render_export_parfile,
     render_import_parfile,
 )
@@ -88,3 +90,22 @@ def test_batch_import_parfile_multiple_remap_schemas() -> None:
     # Both tables on the single TABLES= line.
     assert "HR.EMPLOYEES" in text
     assert "FIN.INVOICES" in text
+
+
+def test_bulk_metadata_import_parfile_no_tables_line() -> None:
+    """render_bulk_metadata_import_parfile must not contain a TABLES= line."""
+    text = render_bulk_metadata_import_parfile(
+        BulkMetadataImportJob(
+            connection=OracleCredentials("system", "pw"),
+            directory="DATA_PUMP_DIR",
+            dumpfiles=("full.dmp",),
+            logfile="bulk-meta.log",
+            remap_schema=("SRC", "DMP_SRC"),
+        )
+    )
+    assert "TABLES=" not in text
+    assert "REMAP_SCHEMA=SRC:DMP_SRC" in text
+    assert "CONTENT=METADATA_ONLY" in text
+    assert "TABLE_EXISTS_ACTION=REPLACE" in text
+    assert "TRANSFORM=SEGMENT_ATTRIBUTES:N" in text
+    assert "EXCLUDE=INDEX" in text

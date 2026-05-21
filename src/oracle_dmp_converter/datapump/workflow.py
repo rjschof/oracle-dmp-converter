@@ -63,6 +63,19 @@ class DumpWorkflow(ABC):
         """
 
     @abstractmethod
+    def import_all_metadata(self, source_schema: str, stage_schema: str) -> None:
+        """Import DDL for all tables in *source_schema* into *stage_schema*.
+
+        Runs a single Oracle tool invocation without a per-table ``TABLES=``
+        restriction.  Post-import adjustments (trigger disabling, VPD policy
+        dropping, BYTE→CHAR column modification) are applied by the converter
+        after this method returns.
+
+        Modern: ``impdp CONTENT=METADATA_ONLY`` without ``TABLES=``.
+        Legacy: ``imp ROWS=N`` without ``TABLES=``.
+        """
+
+    @abstractmethod
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import the DDL for *table* (no row data) into *stage_schema*.
 
@@ -101,6 +114,7 @@ class DumpWorkflow(ABC):
         """
         for source_schema, stage_schema, table, chunk_name, partition_name in chunks:
             self.import_chunk(source_schema, stage_schema, table, chunk_name, partition_name)
+
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +246,9 @@ class _ProbedModernWorkflow(DumpWorkflow):
 
     def required_tablespaces(self) -> frozenset[str]:
         return self._inner.required_tablespaces()
+
+    def import_all_metadata(self, source_schema: str, stage_schema: str) -> None:
+        self._inner.import_all_metadata(source_schema, stage_schema)
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         self._inner.import_metadata(source_schema, stage_schema, table)

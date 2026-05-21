@@ -388,22 +388,204 @@ class OracleDumpConverter:
     # Inspect
     # ------------------------------------------------------------------
 
-    def _metadata_import_table(self, source_schema: str, table: str) -> None:
-        """Import a single table's DDL into the staging schema for inspection.
+    def _disable_triggers(self, source_schema: str) -> None:
+        """Disable all triggers on tables in the staging schema for *source_schema*.
 
-        Ensures the staging schema exists, then delegates to the workflow's
-        metadata-only import.  The workflow uses ``TABLE_EXISTS_ACTION=REPLACE``
-        so re-running inspect against an already-prepared schema is safe.
-        The imported table is left in place so that conversion can use
-        ``TABLE_EXISTS_ACTION=TRUNCATE`` / ``CONTENT=DATA_ONLY`` imports.
-
-        Args:
-            source_schema: Original Oracle schema name from the dump.
-            table: Table to inspect.
+        Queries ``ALL_TRIGGERS`` and issues ``ALTER TRIGGER ... DISABLE`` for each.
+        For modern dumps this is typically a no-op because triggers are excluded
+        at import time; it runs unconditionally for correctness on legacy dumps.
         """
         stage_schema = self._stage_schema_for(source_schema)
-        self.prepare_stage_schema(source_schema)
-        self._require_workflow().import_metadata(source_schema, stage_schema, table)
+        LOGGER.info("Disabling triggers on staging schema %s", stage_schema)
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT TRIGGER_NAME FROM ALL_TRIGGERS WHERE OWNER = :schema",
+                    schema=stage_schema,
+                )
+                triggers = [row[0] for row in cursor.fetchall()]
+            for trigger_name in triggers:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f'ALTER TRIGGER "{stage_schema}"."{trigger_name}" DISABLE'
+                    )
+                LOGGER.debug("Disabled trigger %s.%s", stage_schema, trigger_name)
+
+    def _drop_vpd_policies(self, source_schema: str) -> None:
+        """Drop all VPD (DBMS_RLS) policies on tables in the staging schema.
+
+        Queries ``ALL_POLICIES`` and calls ``DBMS_RLS.DROP_POLICY`` or
+        ``DBMS_RLS.DROP_GROUPED_POLICY`` as appropriate.  Policies are dropped
+        rather than disabled so they cannot interfere with data import or export.
+        """
+        stage_schema = self._stage_schema_for(source_schema)
+        LOGGER.info("Dropping VPD policies on staging schema %s", stage_schema)
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT OBJECT_NAME, POLICY_NAME, POLICY_GROUP
+                    FROM ALL_POLICIES
+                    WHERE OBJECT_OWNER = :schema
+                    """,
+                    schema=stage_schema,
+                )
+                policies = cursor.fetchall()
+            for object_name, policy_name, policy_group in policies:
+                with conn.cursor() as cursor:
+                    if policy_group and policy_group != "SYS_DEFAULT":
+                        cursor.execute(
+                            """
+                            BEGIN
+                                DBMS_RLS.DROP_GROUPED_POLICY(
+                                    object_schema => :schema,
+                                    object_name   => :obj,
+                                    policy_group  => :grp,
+                                    policy_name   => :pol
+                                );
+                            END;
+                            """,
+                            schema=stage_schema,
+                            obj=object_name,
+                            grp=policy_group,
+                            pol=policy_name,
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            BEGIN
+                                DBMS_RLS.DROP_POLICY(
+                                    object_schema => :schema,
+                                    object_name   => :obj,
+                                    policy_name   => :pol
+                                );
+                            END;
+                            """,
+                            schema=stage_schema,
+                            obj=object_name,
+                            pol=policy_name,
+                        )
+                LOGGER.debug(
+                    "Dropped VPD policy %s on %s.%s", policy_name, stage_schema, object_name
+                )
+
+    def _dematerialize_mviews(self, source_schema: str) -> None:
+        """Replace any materialized views in the staging schema with plain tables.
+
+        When ``imp`` or ``impdp`` creates a materialized view in the staging
+        schema, subsequent row imports fail because DML is not permitted on a
+        materialized view.  This method detects such objects and converts them
+        to ordinary heap tables by:
+
+        1. Creating an empty ``CTAS`` copy under a temporary name.
+        2. Dropping the materialized view (which also drops its underlying
+           table segment).
+        3. Renaming the empty table to the original name.
+        """
+        stage_schema = self._stage_schema_for(source_schema)
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT MVIEW_NAME FROM ALL_MVIEWS WHERE OWNER = :schema",
+                    schema=stage_schema,
+                )
+                mviews = [row[0] for row in cursor.fetchall()]
+        if not mviews:
+            return
+        LOGGER.info(
+            "Converting %d materialized view(s) to plain tables in staging schema %s: %s",
+            len(mviews),
+            stage_schema,
+            ", ".join(mviews),
+        )
+        with self._connect() as conn:
+            for mview_name in mviews:
+                tmp_name = f"{mview_name[:120]}_$TMP"
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f'CREATE TABLE "{stage_schema}"."{tmp_name}" AS '
+                        f'SELECT * FROM "{stage_schema}"."{mview_name}" WHERE 1=0'
+                    )
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f'DROP MATERIALIZED VIEW "{stage_schema}"."{mview_name}"'
+                    )
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f'ALTER TABLE "{stage_schema}"."{tmp_name}" RENAME TO "{mview_name}"'
+                    )
+                LOGGER.debug(
+                    "Converted materialized view %s.%s to plain table",
+                    stage_schema,
+                    mview_name,
+                )
+
+    def _apply_byte_to_char(self, source_schema: str) -> None:
+        """Convert all ``BYTE``-length string columns to ``CHAR`` semantics.
+
+        Queries ``ALL_TAB_COLUMNS`` for ``VARCHAR2`` and ``CHAR`` columns with
+        ``CHAR_USED = 'B'`` and issues ``ALTER TABLE ... MODIFY`` for each.
+        This prevents row-level truncation errors that arise when importing a
+        single-byte-charset dump into an ``AL32UTF8`` staging database.
+
+        Columns that cannot have their length semantics changed are excluded:
+
+        * **Virtual columns** (excluded via ``ALL_TABLE_VIRTUAL_COLUMNS``) — modifying
+          them raises ``ORA-54017``.
+        * **Partition key columns** — modifying them raises ``ORA-14060``
+          for both the modern Data Pump and legacy ``imp`` paths.  These
+          columns are excluded, and the partition structure is left in place.
+        * **Subpartition key columns** — same reasoning as partition keys.
+        """
+        stage_schema = self._stage_schema_for(source_schema)
+        LOGGER.info("Applying BYTE\u2192CHAR column adjustments on staging schema %s", stage_schema)
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT tc.TABLE_NAME, tc.COLUMN_NAME, tc.DATA_TYPE, tc.CHAR_LENGTH
+                    FROM ALL_TAB_COLUMNS tc
+                    WHERE tc.OWNER = :schema
+                      AND tc.DATA_TYPE IN ('VARCHAR2', 'CHAR')
+                      AND tc.CHAR_USED = 'B'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM ALL_TABLE_VIRTUAL_COLUMNS vc
+                          WHERE vc.TABLE_OWNER = :schema
+                            AND vc.TABLE_NAME = tc.TABLE_NAME
+                            AND vc.VIRTUAL_COLUMN_NAME = tc.COLUMN_NAME
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM ALL_PART_KEY_COLUMNS pk
+                          WHERE pk.OWNER = :schema
+                            AND pk.NAME = tc.TABLE_NAME
+                            AND pk.COLUMN_NAME = tc.COLUMN_NAME
+                            AND pk.OBJECT_TYPE = 'TABLE'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM ALL_SUBPART_KEY_COLUMNS sk
+                          WHERE sk.OWNER = :schema
+                            AND sk.NAME = tc.TABLE_NAME
+                            AND sk.COLUMN_NAME = tc.COLUMN_NAME
+                            AND sk.OBJECT_TYPE = 'TABLE'
+                      )
+                    """,
+                    schema=stage_schema,
+                )
+                byte_columns = cursor.fetchall()
+            for table_name, column_name, data_type, char_length in byte_columns:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f'ALTER TABLE "{stage_schema}"."{table_name}" '
+                        f'MODIFY "{column_name}" {data_type}({char_length} CHAR)'
+                    )
+                LOGGER.debug(
+                    "Adjusted %s.%s.%s to %s(%d CHAR)",
+                    stage_schema,
+                    table_name,
+                    column_name,
+                    data_type,
+                    char_length,
+                )
 
     def inspect_dump(self) -> DumpManifest:
         """Inspect the dump, auto-detecting format, and return a manifest."""
@@ -412,6 +594,27 @@ class OracleDumpConverter:
 
         total = len(schema_tables)
         LOGGER.info("Discovered %d tables in dump", total)
+
+        # Bulk-import metadata for all tables per schema, then apply staging
+        # adjustments before reading column metadata for the manifest.
+        seen_schemas: set[str] = set()
+        for source_schema, _ in schema_tables:
+            if source_schema in seen_schemas:
+                continue
+            seen_schemas.add(source_schema)
+            stage_schema = self._stage_schema_for(source_schema)
+            LOGGER.info(
+                "Importing metadata for schema %s -> %s",
+                source_schema,
+                stage_schema,
+            )
+            self.prepare_stage_schema(source_schema)
+            self._require_workflow().import_all_metadata(source_schema, stage_schema)
+            self._dematerialize_mviews(source_schema)
+            self._disable_triggers(source_schema)
+            self._drop_vpd_policies(source_schema)
+            self._apply_byte_to_char(source_schema)
+
         tables: list[TableMetadata] = []
         for i, (source_schema, table) in enumerate(schema_tables, start=1):
             stage_schema = self._stage_schema_for(source_schema)
@@ -423,7 +626,6 @@ class OracleDumpConverter:
                 table,
                 stage_schema,
             )
-            self._metadata_import_table(source_schema, table)
             with self._connect() as conn:
                 metadata = discover_table_metadata(conn, stage_schema, table)
             tables.append(

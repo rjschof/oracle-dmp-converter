@@ -147,6 +147,28 @@ class LegacyDumpWorkflow(DumpWorkflow):
         """
         return parse_imp_indexfile_tablespaces(self._indexfile_sql())
 
+    def import_all_metadata(self, source_schema: str, stage_schema: str) -> None:
+        """Import DDL for all tables in *source_schema* via a single ``imp ROWS=N`` call.
+
+        Omitting ``tables`` from the job causes the parfile renderer to emit no
+        ``TABLES=`` line, so ``imp`` imports metadata for every table in the schema
+        at once.
+        """
+        LOGGER.debug("Bulk importing legacy metadata for %s -> %s", source_schema, stage_schema)
+        job = LegacyImportJob(
+            connection=self._credentials,
+            files=self._legacy_files(),
+            logfile=f"imp-bulk-meta-{source_schema}.log"[:120],
+            fromuser=source_schema,
+            touser=stage_schema,
+            tables=(),
+            rows=False,
+            indexes=False,
+            grants=False,
+            constraints=False,
+        )
+        self._inspect_runner.run_imp(job)
+
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import table DDL only (``rows=False``) into the staging schema."""
         LOGGER.debug(

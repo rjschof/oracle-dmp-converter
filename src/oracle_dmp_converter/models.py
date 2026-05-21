@@ -71,6 +71,8 @@ class ColumnMetadata:
         data_precision: Total number of significant digits for NUMBER types.
         data_scale: Number of digits to the right of the decimal point.
         char_length: Maximum character length for character types.
+        char_used: Length semantics for character types: ``'B'`` for byte,
+            ``'C'`` for character, or ``None`` for non-character types.
     """
 
     name: str
@@ -80,6 +82,7 @@ class ColumnMetadata:
     data_precision: int | None = None
     data_scale: int | None = None
     char_length: int | None = None
+    char_used: str | None = None
 
     @property
     def normalized_type(self) -> str:

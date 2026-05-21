@@ -73,6 +73,48 @@ class BatchImportJob:
 
 
 @dataclass(frozen=True)
+class BulkMetadataImportJob:
+    """Parameter specification for an ``impdp`` call that imports all table DDL
+    for one schema without a ``TABLES=`` restriction.
+
+    Used during the inspect phase to load all table metadata in a single Oracle
+    tool invocation.  Post-import adjustments (trigger disabling, VPD policy
+    dropping, BYTE→CHAR column modification) are applied afterwards via direct
+    SQL before any per-chunk data imports begin.
+    """
+
+    connection: OracleCredentials
+    directory: str
+    dumpfiles: tuple[str, ...]
+    logfile: str
+    remap_schema: tuple[str, str]
+    schemas: tuple[str, ...] = ()
+    content: str = "METADATA_ONLY"
+    table_exists_action: str = "REPLACE"
+    exclude: tuple[str, ...] = field(
+        default=(
+            "INDEX",
+            "CONSTRAINT",
+            "REF_CONSTRAINT",
+            "TRIGGER",
+            "STATISTICS",
+            "GRANT",
+            "USER",
+            "TABLESPACE_QUOTA",
+            "VIEW",
+            "PACKAGE",
+            "PACKAGE_BODY",
+            "FUNCTION",
+            "PROCEDURE",
+            "MATERIALIZED_VIEW",
+        )
+    )
+    transform: tuple[str, ...] = field(
+        default=("DISABLE_ARCHIVE_LOGGING:Y", "SEGMENT_ATTRIBUTES:N")
+    )
+
+
+@dataclass(frozen=True)
 class SqlFileJob:
     connection: OracleCredentials
     directory: str
@@ -166,4 +208,29 @@ def render_sqlfile_parfile(job: SqlFileJob) -> str:
         lines.append("FULL=Y")
     for object_type in job.include:
         lines.append(f"INCLUDE={object_type}")
+    return "\n".join(lines) + "\n"
+
+
+def render_bulk_metadata_import_parfile(job: BulkMetadataImportJob) -> str:
+    """Render a parameter file for a schema-wide ``CONTENT=METADATA_ONLY`` import.
+
+    Unlike :func:`render_import_parfile`, no ``TABLES=`` line is emitted so
+    that ``impdp`` imports DDL for all tables in the source schema at once.
+    """
+    source, target = job.remap_schema
+    lines = [
+        f"USERID={job.connection.userid}",
+        f"DIRECTORY={job.directory}",
+        f"DUMPFILE={','.join(job.dumpfiles)}",
+        f"LOGFILE={job.logfile}",
+        f"TABLE_EXISTS_ACTION={job.table_exists_action}",
+        f"CONTENT={job.content}",
+        f"REMAP_SCHEMA={oracle_identifier(source)}:{oracle_identifier(target)}",
+    ]
+    if job.schemas:
+        lines.append(f"SCHEMAS={','.join(oracle_identifier(s) for s in job.schemas)}")
+    for transform in job.transform:
+        lines.append(f"TRANSFORM={transform}")
+    for object_type in job.exclude:
+        lines.append(f"EXCLUDE={object_type}")
     return "\n".join(lines) + "\n"

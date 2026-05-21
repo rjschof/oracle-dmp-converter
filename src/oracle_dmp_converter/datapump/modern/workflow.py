@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from oracle_dmp_converter.datapump.modern.parfile import BatchImportJob, ImportJob, SqlFileJob
+from oracle_dmp_converter.datapump.modern.parfile import (
+    BatchImportJob,
+    BulkMetadataImportJob,
+    ImportJob,
+    SqlFileJob,
+)
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
 from oracle_dmp_converter.datapump.modern.sqlfile import parse_sqlfile_tables
 from oracle_dmp_converter.datapump.workflow import DumpWorkflow
@@ -119,6 +124,25 @@ class DataPumpWorkflow(DumpWorkflow):
     def required_tablespaces(self) -> frozenset[str]:
         """Modern Data Pump imports never require pre-created tablespaces."""
         return frozenset()
+
+    def import_all_metadata(self, source_schema: str, stage_schema: str) -> None:
+        """Import DDL for all tables in *source_schema* via a single ``impdp`` call.
+
+        Uses ``CONTENT=METADATA_ONLY`` and ``TABLE_EXISTS_ACTION=REPLACE`` without
+        a ``TABLES=`` restriction so every table in the schema is created at once.
+        Partition key columns are skipped during BYTE→CHAR adjustment via
+        ``NOT EXISTS`` subqueries in ``_apply_byte_to_char``.
+        """
+        LOGGER.debug("Bulk importing metadata for %s -> %s", source_schema, stage_schema)
+        job = BulkMetadataImportJob(
+            connection=self._credentials,
+            directory=self._directory,
+            dumpfiles=self._dumpfiles,
+            logfile=f"impdp-bulk-meta-{source_schema}.log"[:120],
+            remap_schema=(source_schema, stage_schema),
+            schemas=(source_schema,),
+        )
+        self._inspect_runner.run_bulk_metadata_impdp(job)
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import table DDL only (``CONTENT=METADATA_ONLY``) into the staging schema.

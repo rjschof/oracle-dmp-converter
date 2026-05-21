@@ -80,7 +80,8 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
                    NULLABLE,
                    DATA_PRECISION,
                    DATA_SCALE,
-                   CHAR_LENGTH
+                   CHAR_LENGTH,
+                   CHAR_USED
             FROM ALL_TAB_COLUMNS
             WHERE OWNER = :owner AND TABLE_NAME = :table_name
             ORDER BY COLUMN_ID
@@ -97,6 +98,7 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
                 data_precision=row[4],
                 data_scale=row[5],
                 char_length=row[6],
+                char_used=row[7],
             )
             for row in cursor.fetchall()
         )
