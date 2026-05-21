@@ -1,95 +1,109 @@
 # AGENTS.md
 
-## Project Basics
-- Python 3.12 package managed by `uv`; use `uv add` / `uv add --dev`, not direct `pip` edits.
-- **Src-layout**: package lives at `src/oracle_dmp_converter/`, not at the repo root.
-- CLI entrypoint is `oracle-dmp-converter = oracle_dmp_converter.cli:main` in `pyproject.toml`.
-- The tool supports both Oracle Data Pump (`expdp`) and legacy (`exp`) dumps; it deliberately does not parse proprietary `.dmp` files directly.
-- Default Oracle runtime image is `gvenzl/oracle-free:23-faststart`; override with `ORACLE_DMP_CONVERTER_IMAGE` (env var) or CLI `--oracle-image`.
-- Override Docker `--platform` with `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM` (e.g. `linux/amd64` on Apple Silicon).
+## What this repo is
 
-## Package Structure
-The package uses three subpackages; `__init__.py` files are empty — always import via the full submodule path, never from the subpackage root.
-- `oracle/` — `conn.py` (DB helpers), `exporter.py` (row streaming / Arrow coercion), `format_writer.py` (pluggable Parquet/Avro/CSV writers), `identifiers.py`, `metadata.py`, `types.py`
-- `datapump/` — `runner.py` (Docker exec of expdp/impdp/exp/imp), `parfile.py` (Data Pump parfile rendering), `legacy_parfile.py` (legacy exp/imp parfile rendering), `sqlfile.py` (SQLFILE DDL parser), `imp_show.py` (INDEXFILE / SHOW=Y parser)
-- `io/` — `serialization.py` (manifest + plan JSON/YAML), `state.py` (SQLite resumability), `validation.py` (row-count check)
-- Top-level: `cli.py` (Click commands + Docker mount conventions), `converter.py` (inspect/plan/convert orchestration), `planner.py` (strategy selection), `docker_oracle.py`, `models.py`, `errors.py`, `config.py`
-- `scripts/create_complex_sample_dump.py` and `scripts/create_legacy_exp_sample.py`: standalone sample-data generators; keep out of the product CLI.
+Python 3.12 CLI tool that converts Oracle Data Pump (`expdp`) and legacy (`exp`) dump files to Parquet, Avro, or CSV. It does **not** parse `.dmp` files directly — it spins up Oracle Database Free in Docker/Podman as a temporary staging reader, then exports via PyArrow/fastavro.
 
-## Commands
-- Initial setup: `make setup` (runs `uv sync --all-groups`)
-- Unit tests: `uv run python -m pytest tests/unit` (`uv run pytest` fails — pytest is not on PATH)
-- Integration tests: `uv run python -m pytest tests/integration`
-- Full tests: `uv run python -m pytest`
-- Format/fix: `make format`
-- Ruff check: `make format-check`
-- Pylint: `make lint` (lints `src scripts tests`, not just `src`)
-- Local prerequisite check: `oracle-dmp-converter doctor`
-- No typecheck target — no mypy/pyright configured.
+Entry point: `src/oracle_dmp_converter/cli.py` — Click group with four subcommands: `doctor`, `inspect`, `plan`, `convert`.
 
-## Docker / Oracle Testing Gotchas
-- Integration tests start real Oracle Free containers and run real `expdp` / `impdp`; expect minutes, not seconds.
-- Docker must be running; tests skip if unavailable, but CLI commands fail fast via `doctor`.
-- If an integration run is interrupted, check `docker ps --format '{{.Names}}'` for `oracle-dmp-converter-*` containers and stop leftovers.
-- Tests and CLI mount dump directories into containers; all `--dump` files must be in the same host directory.
-- `DockerOracle.exec()` uses `subprocess.run(["docker", "exec", ...])`, not the Docker SDK's `exec_run()` — SDK's chunked HTTP stream never sends EOF when the container stops mid-exec.
+---
 
-## Conversion Workflow
-- Normal flow is `inspect -> plan -> convert`, producing `manifest.json`, `plan.yaml`, output files, and `state.sqlite`.
-- Full-dump discovery uses Data Pump `SQLFILE`; table metadata comes from `CONTENT=METADATA_ONLY` imports into a staging schema.
-- Staging schema naming: source schema `APP` is imported as `DMP_APP` (prefix is `DMP_`).
-- Legacy `exp` format is auto-detected: `impdp SQLFILE=` is tried first; if `ORA-39142` or `ORA-39143` appears in the output, the converter falls back to `imp INDEXFILE=`. Oracle 23ai Free emits `ORA-39143`; older versions emit `ORA-39142`.
-- Legacy dumps use whole-table strategy only — `imp` has no `QUERY=` support, so hash chunking is unavailable.
-- Large unpartitioned tables need a usable scalar split column for hash chunking; `ROWID` is not a pre-import split strategy.
-- Hash chunking uses Data Pump `QUERY` plus `ORA_HASH`; nullable split columns get an extra null bucket.
-- `range` strategy is **not implemented** — `plan_table()` returns `UNSUPPORTED` for it immediately.
-- `convert-hash-table` is a standalone CLI command that converts a single known table via hash buckets without a prior inspect/plan step.
+## Setup
 
-## Output Formats
-The `convert` and `convert-hash-table` commands accept `--format parquet` (default), `--format avro`, or `--format csv`.
-- Parquet: written via `pyarrow.parquet.ParquetWriter` (streaming, columnar).
-- Avro: written via `fastavro`; Arrow schema is mapped to an Avro record schema; all fields are nullable unions.
-- CSV: written via `pyarrow.csv.write_csv`; header is written once on the first batch.
-- Writer implementations live in `oracle/format_writer.py`; the factory is `make_writer(output_format, path, schema)`.
-
-## Planner: Hash Column Eligibility
-Types that are **never** hash candidates: `BFILE`, `BLOB`, `CLOB`, `LONG`, `LONG RAW`, `NCLOB`, `RAW`, `ROWID`, `UROWID`, `XMLTYPE`.
-Preference order: (1) single-col primary key, (2) single-col unique key, (3) non-nullable scalar, (4) nullable scalar.
-
-## Output Structure
-Output files land at `<output_dir>/<schema>/<table>/<chunk>.<ext>` where names are case-preserved and run through `urllib.parse.quote(name, safe="")` (hyphens, underscores, periods, and tildes are kept as-is; other special characters are percent-encoded).
-- Whole-table chunk: `whole.parquet` / `whole.avro` / `whole.csv`
-- Hash chunks: `hash-00000-of-00064.parquet` (zero-padded 5 digits) + `hash-null.parquet` for null bucket
-- Partition chunks: `partition-00001-<PARTITION_NAME>.parquet`
-
-## Config File (YAML, `--config`)
-See `docs/config.yaml.example` for a fully annotated reference. Core structure:
-```yaml
-oracle:
-  image: gvenzl/oracle-free:23-faststart
-  max_stage_gb: 8          # default staging size limit
-
-default_hash_buckets: 64   # global default; also accepted under oracle: key
-
-tables:
-  SCHEMA.TABLE:
-    strategy: hash | whole  # range is unsupported
-    split_column: COLUMN_NAME
-    buckets: 256
-    force_large: true       # bypass staging size check
-
-columns:
-  SCHEMA.TABLE.COLUMN:
-    expression: "SDO_UTIL.TO_WKTGEOMETRY({column})"
-    parquet_type: string
+```bash
+make setup          # uv sync --all-groups; creates .venv
 ```
-Keys are looked up case-insensitively (exact match, then `.upper()`).
 
-## Sample Dumps
-- Generate complex (Data Pump) sample data: `uv run python scripts/create_complex_sample_dump.py --force` → `sample-data/complex/`
-- Generate legacy exp sample: `uv run python scripts/create_legacy_exp_sample.py` → `sample-data/legacy/`
-- Both directories are git-ignored.
+Run commands via `uv run ...` or activate the venv first. Do not use `pip`.
 
-## Generated / Ignored Artifacts
-- Do not commit `.dmp`, `.log`, `sample-data/`, `work/`, `parquet/`, `.venv/`, or cache directories.
-- Data Pump logs and generated parfiles may appear beside mounted dump directories during manual runs.
+---
+
+## Developer commands
+
+```bash
+make format         # ruff format + ruff check --fix (modifies files)
+make format-check   # check only, no changes; equivalent: uv run ruff check .
+make lint           # uv run pylint src scripts tests
+make clean          # removes .venv dist build work parquet sample-data tests/runs caches
+```
+
+---
+
+## Testing
+
+```bash
+# Unit tests — no Docker required
+uv run python -m pytest tests/unit
+
+# Single test file
+uv run python -m pytest tests/unit/test_planner.py
+
+# Single test by name
+uv run python -m pytest tests/unit/test_planner.py::test_partitioned_table_plans_partition_chunks
+
+# Keyword filter
+uv run python -m pytest -k "test_small_table"
+
+# With coverage
+uv run python -m pytest tests/unit --cov=oracle_dmp_converter
+
+# Integration tests — require Docker; pull ~1-2 GB Oracle image on first run; several minutes
+uv run python -m pytest tests/integration
+```
+
+Integration tests auto-skip when Docker is unavailable (autouse `skip_if_no_docker` fixture in `tests/integration/conftest.py`). No marker needed on individual tests.
+
+`tests/data/` holds real `impdp` log and dump fixtures captured from actual Oracle runs — used by unit tests for DDL parser coverage without a live container.
+
+---
+
+## Architecture notes
+
+### Dump format auto-detection
+`create_workflow()` (`src/oracle_dmp_converter/datapump/workflow.py`) first tries modern `impdp SQLFILE=`. On `ORA-39142` or `ORA-39143` it automatically falls back to legacy `imp INDEXFILE=`. A `_ProbedModernWorkflow` wrapper caches the discovered table list so `discover_tables()` is not called twice.
+
+### Staging schema pattern
+Source schema `SCHEMA` is imported into staging schema `DMP_SCHEMA`. Each chunk import drops the staging table, imports, exports, and drops again. Resumability is tracked in a SQLite `StateStore` at `<work_dir>/convert/state.sqlite`.
+
+### Docker/Podman
+The tool uses the Docker SDK Python library for container management but runs `docker exec` / `docker cp` via `subprocess`, not the SDK exec API (SDK's chunked HTTP stream never closes EOF). Works with both Docker and Podman.
+
+**Apple Silicon:** set `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM=linux/amd64` — Oracle Free only has an amd64 image.
+
+### Oracle-to-Arrow type mapping (`src/oracle_dmp_converter/oracle/types.py`)
+- `NUMBER(p,0)` with `p <= 18` → `int64`; larger or no-scale → `decimal128` or `double`
+- `DATE` / `TIMESTAMP` → `timestamp[us]`
+- `XMLTYPE`, `SDO_GEOMETRY`, `INTERVAL *`, `ANYDATA`, `TIMESTAMP WITH TIME ZONE` → `string` via `TO_CHAR()`
+- Per-column overrides in `config.yaml` can override both the SQL expression and Arrow type
+
+### Output path convention
+`<output_dir>/<schema_lower>/<table_lower>/<chunk>.<ext>` where non-alphanumeric chars in names are replaced with `_`. Chunk name patterns: `whole`, `partition-00001-P_NORTH`, `hash-00000-of-00064`, `hash-null`.
+
+---
+
+## Key env vars
+
+| Var | Effect |
+|---|---|
+| `ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME` | `docker` (default) or `podman` |
+| `ORACLE_DMP_CONVERTER_IMAGE` | Override Oracle image tag |
+| `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM` | Override `--platform` (set `linux/amd64` on Apple Silicon) |
+| `DMP_TO_PARQUET_ORACLE_IMAGE` | Override Oracle image for integration tests specifically |
+
+---
+
+## Style conventions
+
+- Line length: **100** characters (ruff + pylint)
+- All models are **frozen dataclasses**; use `dataclasses.replace()` to derive new instances
+- `from __future__ import annotations` in all source files
+- Pylint disabled: `broad-exception-caught`, `duplicate-code`, `missing-*-docstring`, `too-many-*` — docstrings present but not enforced; "too-many" checks suppressed
+- Circular import avoidance: `datapump/workflow.py` uses deferred imports inside function bodies with `# noqa: PLC0415`
+- pytest runs with `--import-mode=importlib` (set in `pyproject.toml`)
+- Ruff rules: `E`, `F`, `I` (isort), `UP` (pyupgrade), `B` (bugbear)
+
+---
+
+## No CI or pre-commit configured
+
+No `.github/workflows/`, no `.pre-commit-config.yaml`. The `Makefile` is the only task runner.
