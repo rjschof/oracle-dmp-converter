@@ -192,6 +192,9 @@ class OracleDumpConverter:
         dumpfiles: tuple[str, ...],
         directory: str = "DATA_PUMP_DIR",
         directory_path: str = "/opt/oracle/admin/FREE/dpdump",
+        discovery_directory: str = "ORACLE_DMC_DISCOVERY",
+        inspect_directory: str = "ORACLE_DMC_INSPECT",
+        convert_directory: str = "ORACLE_DMC_CONVERT",
         stage_password: str = "StagePwd_123",
         output_format: OutputFormat = OutputFormat.PARQUET,
         config: ConverterConfig | None = None,
@@ -219,6 +222,9 @@ class OracleDumpConverter:
         self.dumpfiles = dumpfiles
         self.directory = directory
         self.directory_path = directory_path.rstrip("/")
+        self.discovery_directory = discovery_directory
+        self.inspect_directory = inspect_directory
+        self.convert_directory = convert_directory
         self.stage_password = stage_password
         self.output_format = output_format
         self.config = config if config is not None else ConverterConfig()
@@ -264,6 +270,9 @@ class OracleDumpConverter:
             dumpfiles=self.dumpfiles,
             container=self.container,
             work_dir=self.work_dir,
+            discovery_directory=self.discovery_directory,
+            inspect_directory=self.inspect_directory,
+            convert_directory=self.convert_directory,
         )
 
     def use_format(self, dump_format: DumpFormat) -> None:
@@ -309,6 +318,9 @@ class OracleDumpConverter:
                 discovery_dir=cfg.work_dir / "discovery",
                 inspect_runner=inspect_runner,
                 convert_runner=convert_runner,
+                discovery_directory=cfg.discovery_directory,
+                inspect_directory=cfg.inspect_directory,
+                convert_directory=cfg.convert_directory,
             )
 
     def _require_workflow(self) -> DumpWorkflow:

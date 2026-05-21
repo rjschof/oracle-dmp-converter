@@ -133,6 +133,9 @@ class WorkflowConfig:
         dumpfiles: Tuple of dump file base-names (without directory path).
         container: Running Oracle Docker container.
         work_dir: Local directory for temporary parfiles.
+        discovery_directory: Oracle DIRECTORY object for work_dir/discovery/.
+        inspect_directory: Oracle DIRECTORY object for work_dir/inspect/.
+        convert_directory: Oracle DIRECTORY object for work_dir/convert/.
     """
 
     credentials: OracleCredentials
@@ -141,6 +144,9 @@ class WorkflowConfig:
     dumpfiles: tuple[str, ...]
     container: DockerOracle
     work_dir: Path
+    discovery_directory: str
+    inspect_directory: str
+    convert_directory: str
 
 
 def create_workflow(cfg: WorkflowConfig) -> DumpWorkflow:
@@ -178,6 +184,9 @@ def create_workflow(cfg: WorkflowConfig) -> DumpWorkflow:
         discovery_dir=cfg.work_dir / "discovery",
         inspect_runner=inspect_runner,
         convert_runner=convert_runner,
+        discovery_directory=cfg.discovery_directory,
+        inspect_directory=cfg.inspect_directory,
+        convert_directory=cfg.convert_directory,
     )
 
     # Probe the format by attempting table discovery with the modern workflow.

@@ -34,16 +34,19 @@ class DataPumpWorkflow(DumpWorkflow):
         discovery_dir: Path,
         inspect_runner: DataPumpRunner,
         convert_runner: DataPumpRunner,
+        discovery_directory: str,
+        inspect_directory: str,
+        convert_directory: str,
     ) -> None:
         """Store all configuration needed to drive modern Data Pump operations.
 
         Args:
             credentials: Oracle credentials written to the parfile ``USERID``
                 field for every ``impdp`` invocation.
-            directory: Oracle DIRECTORY object name (e.g. ``"DUMP_DIR"``).
+            directory: Oracle DIRECTORY object name (e.g. ``"DUMP_DIR"``) for
+                the dump files.
             directory_path: Absolute OS path inside the container that
-                *directory* maps to; used when reading files produced by
-                ``impdp SQLFILE=``.
+                *directory* maps to.
             dumpfiles: Tuple of dump file base-names (without directory path).
             discovery_runner: :class:`DataPumpRunner` used exclusively for the
                 ``SQLFILE=`` discovery invocation; its parfiles are written to
@@ -55,6 +58,15 @@ class DataPumpWorkflow(DumpWorkflow):
                 ``CONTENT=METADATA_ONLY`` imports during the inspect phase.
             convert_runner: :class:`DataPumpRunner` used for data-importing
                 operations.
+            discovery_directory: Oracle DIRECTORY object name that maps to the
+                ``work_dir/discovery/`` host path.  Used as the ``LOGFILE=``
+                and ``SQLFILE=`` directory for discovery invocations.
+            inspect_directory: Oracle DIRECTORY object name that maps to the
+                ``work_dir/inspect/`` host path.  Used as the ``LOGFILE=``
+                directory for inspect-phase imports.
+            convert_directory: Oracle DIRECTORY object name that maps to the
+                ``work_dir/convert/`` host path.  Used as the ``LOGFILE=``
+                directory for convert-phase imports.
         """
         self._credentials = credentials
         self._directory = directory
@@ -65,6 +77,9 @@ class DataPumpWorkflow(DumpWorkflow):
         discovery_dir.mkdir(parents=True, exist_ok=True)
         self._inspect_runner = inspect_runner
         self._convert_runner = convert_runner
+        self._discovery_directory = discovery_directory
+        self._inspect_directory = inspect_directory
+        self._convert_directory = convert_directory
 
     # ------------------------------------------------------------------
     # DumpWorkflow interface
@@ -78,44 +93,23 @@ class DataPumpWorkflow(DumpWorkflow):
         """Discover schema/table pairs via ``impdp SQLFILE=``.
 
         Runs a ``SQLFILE=`` job so that Data Pump writes CREATE TABLE DDL
-        to a file inside the container, then reads and parses that file.
-
-        Saves ``discovery-impdp-sqlfile.log`` (subprocess stdout+stderr) and
-        ``discovery-impdp-sqlfile.sql`` (the DDL written by ``impdp``) into
-        :attr:`_discovery_dir`.
+        directly to :attr:`_discovery_dir` on the host (via the Oracle
+        DIRECTORY object :attr:`_discovery_directory`), then reads and parses
+        that file.  Oracle also writes its own log file to the same directory.
         """
-        sqlfile = "dmpconverter-discovery.sql"
+        sqlfile_name = "discovery-impdp-sqlfile.sql"
         job = SqlFileJob(
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile="dmpconverter-discovery.log",
-            sqlfile=sqlfile,
+            logfile=f"{self._discovery_directory}:discovery-impdp-sqlfile.log",
+            sqlfile=f"{self._discovery_directory}:{sqlfile_name}",
         )
-        LOGGER.info("Running impdp SQLFILE discovery (sqlfile=%s)", sqlfile)
-        log_output = self._discovery_runner.run_sqlfile(job)
+        LOGGER.info("Running impdp SQLFILE discovery (sqlfile=%s)", sqlfile_name)
+        self._discovery_runner.run_sqlfile(job)
 
-        # Try the canonical directory path first, then a glob for sub-dirs.
-        sql_text = self._discovery_runner.read_remote_file(f"{self._directory_path}/{sqlfile}")
-        if not sql_text:
-            result = self._discovery_runner.container.exec(
-                [
-                    "bash",
-                    "-lc",
-                    (
-                        "for path in "
-                        f"{self._directory_path}/{sqlfile} "
-                        f"{self._directory_path}/*/{sqlfile}; do "
-                        '[ -f "$path" ] && cat "$path"; '
-                        "done"
-                    ),
-                ],
-                check=False,
-            )
-            sql_text = result.stdout if result.returncode == 0 else ""
-
-        (self._discovery_dir / "discovery-impdp-sqlfile.log").write_text(log_output)
-        (self._discovery_dir / "discovery-impdp-sqlfile.sql").write_text(sql_text)
+        sqlfile_path = self._discovery_dir / sqlfile_name
+        sql_text = sqlfile_path.read_text() if sqlfile_path.exists() else ""
 
         tables = parse_sqlfile_tables(sql_text)
         LOGGER.info("SQLFILE discovery found %d tables", len(tables))
@@ -138,7 +132,7 @@ class DataPumpWorkflow(DumpWorkflow):
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile=f"impdp-bulk-meta-{source_schema}.log"[:120],
+            logfile=f"{self._inspect_directory}:impdp-bulk-meta-{source_schema}.log"[:200],
             remap_schema=(source_schema, stage_schema),
             schemas=(source_schema,),
         )
@@ -155,7 +149,7 @@ class DataPumpWorkflow(DumpWorkflow):
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile=f"metadata-{source_schema}-{table}.log"[:120],
+            logfile=f"{self._inspect_directory}:metadata-{source_schema}-{table}.log"[:200],
             source_schema=source_schema,
             table=table,
             remap_schema=(source_schema, stage_schema),
@@ -186,7 +180,7 @@ class DataPumpWorkflow(DumpWorkflow):
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile=f"impdp-{source_schema}-{table}-{chunk_name}.log"[:120],
+            logfile=f"{self._convert_directory}:impdp-{source_schema}-{table}-{chunk_name}.log"[:200],
             source_schema=source_schema,
             table=table,
             remap_schema=(source_schema, stage_schema),
@@ -219,12 +213,12 @@ class DataPumpWorkflow(DumpWorkflow):
         remap_schemas = tuple(seen.items())
         # Build a short logfile name from the first few table names.
         table_names = [t for _s, _st, t, _c, _p in chunks[:3]]
-        logfile = f"impdp-batch-{'-'.join(table_names)}.log"[:120]
+        logfile_name = f"impdp-batch-{'-'.join(table_names)}.log"[:120]
         job = BatchImportJob(
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile=logfile,
+            logfile=f"{self._convert_directory}:{logfile_name}",
             table_specs=table_specs,
             remap_schemas=remap_schemas,
             content="DATA_ONLY",

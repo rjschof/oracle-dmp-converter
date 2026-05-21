@@ -34,6 +34,12 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DUMP_DIRECTORY = "ORACLE_DMC_DUMP"
 DEFAULT_CONTAINER_DUMP_PATH = "/dumps"
+DEFAULT_CONTAINER_DISCOVERY_PATH = "/work/discovery"
+DEFAULT_CONTAINER_INSPECT_PATH = "/work/inspect"
+DEFAULT_CONTAINER_CONVERT_PATH = "/work/convert"
+ORACLE_DMC_DISCOVERY = "ORACLE_DMC_DISCOVERY"
+ORACLE_DMC_INSPECT = "ORACLE_DMC_INSPECT"
+ORACLE_DMC_CONVERT = "ORACLE_DMC_CONVERT"
 SESSION_FILENAME = "session.json"
 
 
@@ -165,6 +171,52 @@ def _create_dump_directory(admin: OracleAdminConnection) -> None:
         create_directory(conn, DEFAULT_DUMP_DIRECTORY, DEFAULT_CONTAINER_DUMP_PATH)
 
 
+def _ensure_work_subdirs(work_dir: Path) -> tuple[tuple[Path, str, str], ...]:
+    """Create work subdirectories and return bind-mount tuples for the container.
+
+    Creates ``discovery/``, ``inspect/``, and ``convert/`` under *work_dir* so
+    they exist before the Oracle container starts (DockerOracle validates mount
+    paths on startup).  Returns three ``(host_path, container_path, mode)``
+    tuples for adding to the container's mount list.
+
+    Args:
+        work_dir: Host-side working directory.
+
+    Returns:
+        Tuple of three bind-mount specs for the work subdirectories.
+    """
+    subdirs = (
+        (work_dir / "discovery", DEFAULT_CONTAINER_DISCOVERY_PATH),
+        (work_dir / "inspect", DEFAULT_CONTAINER_INSPECT_PATH),
+        (work_dir / "convert", DEFAULT_CONTAINER_CONVERT_PATH),
+    )
+    for host_path, _ in subdirs:
+        host_path.mkdir(parents=True, exist_ok=True)
+    return tuple((host_path, container_path, "rw") for host_path, container_path in subdirs)
+
+
+def _create_work_dir_directories(admin: OracleAdminConnection) -> None:
+    """Create Oracle DIRECTORY objects for the three work subdirectories.
+
+    Each ``impdp`` invocation writes its ``LOGFILE=`` (and ``SQLFILE=`` for
+    discovery) to one of these directories instead of to the dump directory,
+    so Oracle artefacts are routed to the correct host-side work subdir.
+
+    Args:
+        admin: Administrative connection descriptor for the running container.
+    """
+    with oracle_connection(
+        host=admin.host,
+        port=admin.port,
+        service=admin.service,
+        user=admin.user,
+        password=admin.password,
+    ) as conn:
+        create_directory(conn, ORACLE_DMC_DISCOVERY, DEFAULT_CONTAINER_DISCOVERY_PATH)
+        create_directory(conn, ORACLE_DMC_INSPECT, DEFAULT_CONTAINER_INSPECT_PATH)
+        create_directory(conn, ORACLE_DMC_CONVERT, DEFAULT_CONTAINER_CONVERT_PATH)
+
+
 def _build_converter(
     *,
     container: DockerOracle,
@@ -173,6 +225,9 @@ def _build_converter(
     dumpfiles: tuple[str, ...],
     output_format: OutputFormat = OutputFormat.PARQUET,
     config: ConverterConfig | None = None,
+    discovery_directory: str = ORACLE_DMC_DISCOVERY,
+    inspect_directory: str = ORACLE_DMC_INSPECT,
+    convert_directory: str = ORACLE_DMC_CONVERT,
 ) -> OracleDumpConverter:
     """Construct an :class:`~oracle_dmp_converter.converter.OracleDumpConverter`.
 
@@ -202,6 +257,9 @@ def _build_converter(
         directory_path=DEFAULT_CONTAINER_DUMP_PATH,
         output_format=output_format,
         config=config,
+        discovery_directory=discovery_directory,
+        inspect_directory=inspect_directory,
+        convert_directory=convert_directory,
     )
 
 
@@ -286,10 +344,12 @@ def inspect(
         _cleanup_stale_session(session_path)
 
     LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", oracle_image, dump_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    work_subdir_mounts = _ensure_work_subdirs(work_dir)
     container = DockerOracle.start(
         image=oracle_image,
         password=oracle_password,
-        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+        mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"), *work_subdir_mounts),
         runtime=container_runtime,
     )
     try:
@@ -303,6 +363,7 @@ def inspect(
             DEFAULT_CONTAINER_DUMP_PATH,
         )
         _create_dump_directory(admin)
+        _create_work_dir_directories(admin)
         converter = _build_converter(
             container=container,
             admin=admin,
@@ -520,10 +581,12 @@ def convert(
         )
     else:
         LOGGER.info("Starting Oracle container (image=%s, dump_dir=%s)", image, dump_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        work_subdir_mounts = _ensure_work_subdirs(work_dir)
         container = DockerOracle.start(
             image=image,
             password=oracle_password,
-            mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"),),
+            mounts=((dump_dir, DEFAULT_CONTAINER_DUMP_PATH, "rw"), *work_subdir_mounts),
             runtime=effective_runtime,
         )
 
@@ -538,6 +601,7 @@ def convert(
             DEFAULT_CONTAINER_DUMP_PATH,
         )
         _create_dump_directory(admin)
+        _create_work_dir_directories(admin)
         converter = _build_converter(
             container=container,
             admin=admin,

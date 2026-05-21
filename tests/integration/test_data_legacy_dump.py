@@ -20,7 +20,7 @@ Each test exercises one CLI subcommand in isolation:
 from __future__ import annotations
 
 import os
-import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -40,10 +40,8 @@ _LEGACY_DUMP = _DATA_DIR / "legacy.dmp"
 
 
 def _run_dir(name: str) -> Path:
-    """Return a fresh, empty directory under tests/runs/ for a test run."""
-    path = _RUNS_DIR / name
-    if path.exists():
-        shutil.rmtree(path)
+    """Return a unique, empty directory under tests/runs/ for a test run."""
+    path = _RUNS_DIR / f"{name}_{uuid.uuid4().hex[:8]}"
     path.mkdir(parents=True)
     return path
 
