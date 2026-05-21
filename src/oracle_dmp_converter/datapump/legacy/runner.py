@@ -39,18 +39,22 @@ class LegacyRunner(_BaseRunner):
         """
         return self._run_tool(["imp"], render_legacy_import_parfile(job), "imp")
 
-    def run_imp_indexfile(self, job: LegacyIndexFileJob) -> str:
+    def run_imp_indexfile(self, job: LegacyIndexFileJob) -> tuple[str, str]:
         """Run ``imp INDEXFILE=`` to discover tables in a legacy dump.
 
         Writes CREATE TABLE / CREATE INDEX DDL to *job.indexfile* inside
-        the container, then reads and returns that file's contents.
-        Returns an empty string if the file cannot be read (e.g. the dump
-        is empty or contains no table objects).
+        the container, then reads and returns that file's contents alongside
+        the combined stdout+stderr from the ``imp`` invocation.
+
+        Returns a ``(sql_content, log_output)`` tuple.  *sql_content* is the
+        indexfile DDL text (empty string if the file cannot be read).
+        *log_output* is the combined stdout+stderr from the ``imp`` process.
 
         Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
         exit from ``imp``.
         """
-        self._run_tool(["imp"], render_legacy_indexfile_parfile(job), "imp-indexfile")
+        log_output = self._run_tool(["imp"], render_legacy_indexfile_parfile(job), "imp-indexfile")
 
         cat_result = self.container.exec(["cat", job.indexfile], check=False)
-        return cat_result.stdout if cat_result.returncode == 0 else ""
+        sql_content = cat_result.stdout if cat_result.returncode == 0 else ""
+        return sql_content, log_output

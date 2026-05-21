@@ -39,6 +39,8 @@ class LegacyDumpWorkflow(DumpWorkflow):
         credentials: OracleCredentials,
         directory_path: str,
         dumpfiles: tuple[str, ...],
+        discovery_runner: LegacyRunner,
+        discovery_dir: Path,
         inspect_runner: LegacyRunner,
         convert_runner: LegacyRunner,
     ) -> None:
@@ -51,14 +53,23 @@ class LegacyDumpWorkflow(DumpWorkflow):
                 dump files reside.
             dumpfiles: Tuple of dump file base-names (without the directory
                 path prefix).
-            inspect_runner: :class:`LegacyRunner` used for read-only discovery
-                operations (``INDEXFILE=``).
+            discovery_runner: :class:`LegacyRunner` used exclusively for the
+                ``INDEXFILE=`` discovery invocation; its parfiles are written
+                to ``discovery_dir / "parfiles"``.
+            discovery_dir: Local directory where discovery artifacts
+                (parfiles, ``.log``, ``.sql``) are written.  Created
+                automatically if it does not already exist.
+            inspect_runner: :class:`LegacyRunner` used for read-only
+                ``ROWS=N`` metadata imports during the inspect phase.
             convert_runner: :class:`LegacyRunner` used for data-importing
                 operations (row imports).
         """
         self._credentials = credentials
         self._directory_path = directory_path.rstrip("/")
         self._dumpfiles = dumpfiles
+        self._discovery_runner = discovery_runner
+        self._discovery_dir = discovery_dir
+        discovery_dir.mkdir(parents=True, exist_ok=True)
         self._inspect_runner = inspect_runner
         self._convert_runner = convert_runner
         # Cached after the first call to _indexfile_sql().
@@ -77,6 +88,10 @@ class LegacyDumpWorkflow(DumpWorkflow):
 
         Falls back to reading from the directory path if ``/tmp`` does not
         contain the indexfile (some Oracle versions write it there instead).
+
+        Saves ``discovery-imp-indexfile.log`` (subprocess stdout+stderr) and
+        ``discovery-imp-indexfile.sql`` (the indexfile DDL) into
+        :attr:`_discovery_dir`.
         """
         if self._cached_sql is not None:
             return self._cached_sql
@@ -93,18 +108,22 @@ class LegacyDumpWorkflow(DumpWorkflow):
             ", ".join(self._dumpfiles),
             _INDEXFILE_REMOTE,
         )
-        sql_text = self._inspect_runner.run_imp_indexfile(job)
+        sql_text, log_output = self._discovery_runner.run_imp_indexfile(job)
 
         if not sql_text:
             LOGGER.debug(
                 "INDEXFILE not found at %s; trying dump directory fallback", _INDEXFILE_REMOTE
             )
-            alt = self._inspect_runner.container.exec(
+            alt = self._discovery_runner.container.exec(
                 ["cat", f"{self._directory_path}/{_INDEXFILE_NAME}"], check=False
             )
             sql_text = alt.stdout if alt.returncode == 0 else ""
 
         LOGGER.info("imp INDEXFILE discovery complete (%d chars of DDL)", len(sql_text))
+
+        (self._discovery_dir / "discovery-imp-indexfile.log").write_text(log_output)
+        (self._discovery_dir / "discovery-imp-indexfile.sql").write_text(sql_text)
+
         self._cached_sql = sql_text
         return self._cached_sql
 
@@ -184,8 +203,19 @@ class LegacyDumpWorkflow(DumpWorkflow):
 def make_legacy_runners(
     container: object,
     work_dir: Path,
-) -> tuple[LegacyRunner, LegacyRunner]:
-    """Create the inspect and convert ``LegacyRunner`` pair for a given container."""
-    inspect_runner = LegacyRunner(container, work_dir / "inspect" / "parfiles")  # type: ignore[arg-type]
-    convert_runner = LegacyRunner(container, work_dir / "convert" / "parfiles")  # type: ignore[arg-type]
-    return inspect_runner, convert_runner
+) -> tuple[LegacyRunner, LegacyRunner, LegacyRunner]:
+    """Create the discovery, inspect, and convert ``LegacyRunner`` triple.
+
+    Returns ``(discovery_runner, inspect_runner, convert_runner)``.
+
+    * *discovery_runner* writes parfiles to ``work_dir/discovery/parfiles/``
+      and is used exclusively for the ``INDEXFILE=`` discovery invocation.
+    * *inspect_runner* writes parfiles to ``work_dir/inspect/parfiles/``
+      and handles ``ROWS=N`` metadata imports during the inspect phase.
+    * *convert_runner* writes parfiles to ``work_dir/convert/parfiles/``
+      and handles data-importing operations.
+    """
+    discovery_runner = LegacyRunner(container, work_dir / "discovery" / "parfiles")  # type: ignore[arg-type]
+    inspect_runner   = LegacyRunner(container, work_dir / "inspect"   / "parfiles")  # type: ignore[arg-type]
+    convert_runner   = LegacyRunner(container, work_dir / "convert"   / "parfiles")  # type: ignore[arg-type]
+    return discovery_runner, inspect_runner, convert_runner

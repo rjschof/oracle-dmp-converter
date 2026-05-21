@@ -279,21 +279,29 @@ class OracleDumpConverter:
 
         cfg = self._workflow_config()
         if dump_format is DumpFormat.LEGACY:
-            inspect_runner, convert_runner = make_legacy_runners(cfg.container, cfg.work_dir)
+            legacy_discovery, legacy_inspect, legacy_convert = make_legacy_runners(
+                cfg.container, cfg.work_dir
+            )
             self._workflow = LegacyDumpWorkflow(
                 credentials=cfg.credentials,
                 directory_path=cfg.directory_path,
                 dumpfiles=cfg.dumpfiles,
-                inspect_runner=inspect_runner,
-                convert_runner=convert_runner,
+                discovery_runner=legacy_discovery,
+                discovery_dir=cfg.work_dir / "discovery",
+                inspect_runner=legacy_inspect,
+                convert_runner=legacy_convert,
             )
         else:
-            inspect_runner, convert_runner = make_modern_runners(cfg.container, cfg.work_dir)
+            discovery_runner, inspect_runner, convert_runner = make_modern_runners(
+                cfg.container, cfg.work_dir
+            )
             self._workflow = DataPumpWorkflow(
                 credentials=cfg.credentials,
                 directory=cfg.directory,
                 directory_path=cfg.directory_path,
                 dumpfiles=cfg.dumpfiles,
+                discovery_runner=discovery_runner,
+                discovery_dir=cfg.work_dir / "discovery",
                 inspect_runner=inspect_runner,
                 convert_runner=convert_runner,
             )

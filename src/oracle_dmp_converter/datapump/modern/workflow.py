@@ -25,6 +25,8 @@ class DataPumpWorkflow(DumpWorkflow):
         directory: str,
         directory_path: str,
         dumpfiles: tuple[str, ...],
+        discovery_runner: DataPumpRunner,
+        discovery_dir: Path,
         inspect_runner: DataPumpRunner,
         convert_runner: DataPumpRunner,
     ) -> None:
@@ -38,8 +40,14 @@ class DataPumpWorkflow(DumpWorkflow):
                 *directory* maps to; used when reading files produced by
                 ``impdp SQLFILE=``.
             dumpfiles: Tuple of dump file base-names (without directory path).
+            discovery_runner: :class:`DataPumpRunner` used exclusively for the
+                ``SQLFILE=`` discovery invocation; its parfiles are written to
+                ``discovery_dir / "parfiles"``.
+            discovery_dir: Local directory where discovery artifacts
+                (parfiles, ``.log``, ``.sql``) are written.  Created
+                automatically if it does not already exist.
             inspect_runner: :class:`DataPumpRunner` used for read-only
-                discovery operations (``SQLFILE=``, ``CONTENT=METADATA_ONLY``).
+                ``CONTENT=METADATA_ONLY`` imports during the inspect phase.
             convert_runner: :class:`DataPumpRunner` used for data-importing
                 operations.
         """
@@ -47,6 +55,9 @@ class DataPumpWorkflow(DumpWorkflow):
         self._directory = directory
         self._directory_path = directory_path.rstrip("/")
         self._dumpfiles = dumpfiles
+        self._discovery_runner = discovery_runner
+        self._discovery_dir = discovery_dir
+        discovery_dir.mkdir(parents=True, exist_ok=True)
         self._inspect_runner = inspect_runner
         self._convert_runner = convert_runner
 
@@ -63,6 +74,10 @@ class DataPumpWorkflow(DumpWorkflow):
 
         Runs a ``SQLFILE=`` job so that Data Pump writes CREATE TABLE DDL
         to a file inside the container, then reads and parses that file.
+
+        Saves ``discovery-impdp-sqlfile.log`` (subprocess stdout+stderr) and
+        ``discovery-impdp-sqlfile.sql`` (the DDL written by ``impdp``) into
+        :attr:`_discovery_dir`.
         """
         sqlfile = "dmp2parquet-discovery.sql"
         job = SqlFileJob(
@@ -73,12 +88,12 @@ class DataPumpWorkflow(DumpWorkflow):
             sqlfile=sqlfile,
         )
         LOGGER.info("Running impdp SQLFILE discovery (sqlfile=%s)", sqlfile)
-        self._inspect_runner.run_sqlfile(job)
+        log_output = self._discovery_runner.run_sqlfile(job)
 
         # Try the canonical directory path first, then a glob for sub-dirs.
-        sql_text = self._inspect_runner.read_remote_file(f"{self._directory_path}/{sqlfile}")
+        sql_text = self._discovery_runner.read_remote_file(f"{self._directory_path}/{sqlfile}")
         if not sql_text:
-            result = self._inspect_runner.container.exec(
+            result = self._discovery_runner.container.exec(
                 [
                     "bash",
                     "-lc",
@@ -93,6 +108,9 @@ class DataPumpWorkflow(DumpWorkflow):
                 check=False,
             )
             sql_text = result.stdout if result.returncode == 0 else ""
+
+        (self._discovery_dir / "discovery-impdp-sqlfile.log").write_text(log_output)
+        (self._discovery_dir / "discovery-impdp-sqlfile.sql").write_text(sql_text)
 
         tables = parse_sqlfile_tables(sql_text)
         LOGGER.info("SQLFILE discovery found %d tables", len(tables))
@@ -146,8 +164,19 @@ class DataPumpWorkflow(DumpWorkflow):
 def make_modern_runners(
     container: object,
     work_dir: Path,
-) -> tuple[DataPumpRunner, DataPumpRunner]:
-    """Create the inspect and convert ``DataPumpRunner`` pair for a given container."""
-    inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")  # type: ignore[arg-type]
-    convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")  # type: ignore[arg-type]
-    return inspect_runner, convert_runner
+) -> tuple[DataPumpRunner, DataPumpRunner, DataPumpRunner]:
+    """Create the discovery, inspect, and convert ``DataPumpRunner`` triple.
+
+    Returns ``(discovery_runner, inspect_runner, convert_runner)``.
+
+    * *discovery_runner* writes parfiles to ``work_dir/discovery/parfiles/``
+      and is used exclusively for the ``SQLFILE=`` discovery invocation.
+    * *inspect_runner* writes parfiles to ``work_dir/inspect/parfiles/``
+      and handles ``CONTENT=METADATA_ONLY`` imports during the inspect phase.
+    * *convert_runner* writes parfiles to ``work_dir/convert/parfiles/``
+      and handles data-importing operations.
+    """
+    discovery_runner = DataPumpRunner(container, work_dir / "discovery" / "parfiles")  # type: ignore[arg-type]
+    inspect_runner   = DataPumpRunner(container, work_dir / "inspect"   / "parfiles")  # type: ignore[arg-type]
+    convert_runner   = DataPumpRunner(container, work_dir / "convert"   / "parfiles")  # type: ignore[arg-type]
+    return discovery_runner, inspect_runner, convert_runner
