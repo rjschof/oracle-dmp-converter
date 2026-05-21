@@ -1,6 +1,6 @@
 [project]
 name = "oracle-dmp-converter"
-version = "0.4.0"
+version = "0.5.0"
 description = "Convert Oracle Data Pump dumps to Parquet, Avro, or CSV through Oracle Free staging."
 readme = "README.md"
 requires-python = ">=3.12"
