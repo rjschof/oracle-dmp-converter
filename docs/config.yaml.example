@@ -20,7 +20,7 @@ oracle:
   # Docker image used as the temporary Oracle Free staging database.
   # Default: gvenzl/oracle-free:23-faststart
   # Override at the CLI level with --oracle-image or the env var
-  # ORACLE_DMP_CONVERTER_IMAGE.
+  # DMP_CONVERTER_IMAGE.
   image: gvenzl/oracle-free:23-faststart
 
 # ---------------------------------------------------------------------------

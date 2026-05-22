@@ -13,11 +13,11 @@ DEFAULT_CONTAINER_RUNTIME = "docker"
 
 
 def _default_oracle_image() -> str:
-    return os.environ.get("ORACLE_DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE)
+    return os.environ.get("DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE)
 
 
 def _default_container_runtime() -> str:
-    return os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME)
+    return os.environ.get("DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME)
 
 
 @dataclass(frozen=True)
@@ -35,12 +35,12 @@ class ConverterSettings:
             plan-only workflows.
         output_format: Target output format for converted data.
         oracle_image: Docker/Podman image tag for the Oracle Free container.
-            Reads ``ORACLE_DMP_CONVERTER_IMAGE`` at instantiation when not
+            Reads ``DMP_CONVERTER_IMAGE`` at instantiation when not
             given explicitly.
         oracle_password: ``ORACLE_PASSWORD`` set on the running container.  No
             default — callers must specify a value.
         container_runtime: Container runtime CLI (``"docker"`` or ``"podman"``).
-            Reads ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` at instantiation
+            Reads ``DMP_CONVERTER_CONTAINER_RUNTIME`` at instantiation
             when not given explicitly.
         userns_mode: User-namespace mode passed to the container runtime (e.g.
             ``"keep-id"`` for rootless Podman).  ``None`` leaves the runtime

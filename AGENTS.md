@@ -68,7 +68,7 @@ Source schema `SCHEMA` is imported into staging schema `DMP_SCHEMA`. Each chunk 
 ### Docker/Podman
 The tool uses the Docker SDK Python library for container management but runs `docker exec` / `docker cp` via `subprocess`, not the SDK exec API (SDK's chunked HTTP stream never closes EOF). Works with both Docker and Podman.
 
-**Apple Silicon:** set `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM=linux/amd64` — Oracle Free only has an amd64 image.
+**Apple Silicon:** set `DMP_CONVERTER_DOCKER_PLATFORM=linux/amd64` — Oracle Free only has an amd64 image.
 
 ### Oracle-to-Arrow type mapping (`src/oracle_dmp_converter/oracle/types.py`)
 - `NUMBER(p,0)` with `p <= 18` → `int64`; larger or no-scale → `decimal128` or `double`
@@ -85,10 +85,9 @@ The tool uses the Docker SDK Python library for container management but runs `d
 
 | Var | Effect |
 |---|---|
-| `ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME` | `docker` (default) or `podman` |
-| `ORACLE_DMP_CONVERTER_IMAGE` | Override Oracle image tag |
-| `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM` | Override `--platform` (set `linux/amd64` on Apple Silicon) |
-| `DMP_CONVERTER_ORACLE_IMAGE` | Override Oracle image for integration tests specifically |
+| `DMP_CONVERTER_CONTAINER_RUNTIME` | `docker` (default) or `podman` |
+| `DMP_CONVERTER_IMAGE` | Override Oracle image tag |
+| `DMP_CONVERTER_DOCKER_PLATFORM` | Override `--platform` (set `linux/amd64` on Apple Silicon) |
 
 ---
 

@@ -82,5 +82,5 @@ jobs:
       - name: Run integration tests
         run: uv run pytest tests/integration -v
         env:
-          DMP_CONVERTER_ORACLE_IMAGE: gvenzl/oracle-free:23-faststart
+          DMP_CONVERTER_IMAGE: gvenzl/oracle-free:23-faststart
         timeout-minutes: 30

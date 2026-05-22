@@ -223,7 +223,7 @@ class ContainerOracle:
         service: Oracle PDB service name (default ``"FREEPDB1"``).
         name: Container name; auto-generated if not supplied.
         platform: Docker ``--platform`` override (e.g. ``"linux/amd64"``).
-            Read from ``ORACLE_DMP_CONVERTER_DOCKER_PLATFORM`` if unset.
+            Read from ``DMP_CONVERTER_DOCKER_PLATFORM`` if unset.
         mounts: Sequence of ``(host_path, container_path, mode)`` triples
             describing bind mounts added at startup.
         runtime: Container runtime CLI (``"docker"`` or ``"podman"``).
@@ -267,16 +267,16 @@ class ContainerOracle:
         Args:
             image: Docker image tag.  Defaults to
                 :data:`~oracle_dmp_converter.config.DEFAULT_ORACLE_IMAGE` or
-                ``ORACLE_DMP_CONVERTER_IMAGE`` environment variable.
+                ``DMP_CONVERTER_IMAGE`` environment variable.
             password: Oracle SYS/SYSTEM password set via ``ORACLE_PASSWORD``.
             service: Oracle PDB service name.
             name: Container name; auto-generated if omitted.
             platform: Docker ``--platform`` string; falls back to
-                ``ORACLE_DMP_CONVERTER_DOCKER_PLATFORM`` environment variable.
+                ``DMP_CONVERTER_DOCKER_PLATFORM`` environment variable.
             mounts: Bind mounts as ``(host_path, container_path, mode)``
                 triples, e.g. ``((Path("/dumps"), "/dumps", "rw"),)``.
             runtime: Container runtime override; falls back to
-                ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
+                ``DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
             userns_mode: User-namespace mode (e.g. ``"keep-id"`` for rootless
                 Podman).  ``None`` leaves the runtime default.
 
@@ -295,10 +295,10 @@ class ContainerOracle:
             password=password,
             service=service,
             name=name or f"oracle-dmp-converter-{uuid.uuid4().hex[:12]}",
-            platform=platform or os.environ.get("ORACLE_DMP_CONVERTER_DOCKER_PLATFORM"),
+            platform=platform or os.environ.get("DMP_CONVERTER_DOCKER_PLATFORM"),
             mounts=mounts,
             runtime=runtime
-            or os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME),
+            or os.environ.get("DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME),
             userns_mode=userns_mode,
         )
         container._start_container()
@@ -331,7 +331,7 @@ class ContainerOracle:
                 create anything.
             service: Oracle PDB service name (default ``"FREEPDB1"``).
             runtime: Container runtime CLI override; falls back to
-                ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
+                ``DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
 
         Returns:
             A :class:`ContainerOracle` instance with :attr:`started` set to
@@ -344,7 +344,7 @@ class ContainerOracle:
                 Docker/Podman daemon cannot be reached.
         """
         effective_runtime = runtime or os.environ.get(
-            "ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME
+            "DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME
         )
         client = _docker_client(effective_runtime)
         try:

@@ -29,11 +29,11 @@ _DEFAULT_PASSWORD = "OraclePwd_123"
 
 
 def _default_runtime() -> str:
-    return os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME)
+    return os.environ.get("DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME)
 
 
 def _default_image() -> str:
-    return os.environ.get("ORACLE_DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE)
+    return os.environ.get("DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE)
 
 
 def _container_options(func: Callable) -> Callable:

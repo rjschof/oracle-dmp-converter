@@ -64,10 +64,10 @@ def test_settings_oracle_image_reads_env_at_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Proves default_factory semantics — env is read when instance is built."""
-    monkeypatch.setenv("ORACLE_DMP_CONVERTER_IMAGE", "envimage:latest")
+    monkeypatch.setenv("DMP_CONVERTER_IMAGE", "envimage:latest")
     s = _settings(tmp_path)
     assert s.oracle_image == "envimage:latest"
-    monkeypatch.setenv("ORACLE_DMP_CONVERTER_IMAGE", "second:latest")
+    monkeypatch.setenv("DMP_CONVERTER_IMAGE", "second:latest")
     s2 = _settings(tmp_path)
     assert s2.oracle_image == "second:latest"
 
@@ -75,7 +75,7 @@ def test_settings_oracle_image_reads_env_at_construction(
 def test_settings_container_runtime_reads_env_at_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", "podman")
+    monkeypatch.setenv("DMP_CONVERTER_CONTAINER_RUNTIME", "podman")
     s = _settings(tmp_path)
     assert s.container_runtime == "podman"
 

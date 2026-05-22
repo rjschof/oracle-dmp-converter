@@ -32,9 +32,9 @@ The implementation is chunk-oriented so large dumps can be processed table-by-ta
 gvenzl/oracle-free:23-faststart
 ```
 
-Override with `ORACLE_DMP_CONVERTER_IMAGE` (env var) or `--oracle-image` (CLI flag).
+Override with `DMP_CONVERTER_IMAGE` (env var) or `--oracle-image` (CLI flag).
 
-Override Docker `--platform` with `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM` (e.g. `linux/amd64` on Apple Silicon).
+Override Docker `--platform` with `DMP_CONVERTER_DOCKER_PLATFORM` (e.g. `linux/amd64` on Apple Silicon).
 
 ## Commands
 

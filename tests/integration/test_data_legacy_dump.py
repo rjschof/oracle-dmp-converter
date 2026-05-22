@@ -68,7 +68,7 @@ _PASSWORD = "OraclePwd_123"
 
 
 def _image() -> str:
-    return os.environ.get("DMP_CONVERTER_ORACLE_IMAGE", DEFAULT_ORACLE_IMAGE)
+    return os.environ.get("DMP_CONVERTER_IMAGE", DEFAULT_ORACLE_IMAGE)
 
 
 # ---------------------------------------------------------------------------
