@@ -47,4 +47,3 @@ class TestParseSqlfileTablespaces:
 
     def test_empty_sql_returns_empty(self) -> None:
         assert parse_sqlfile_tablespaces("") == frozenset()
-

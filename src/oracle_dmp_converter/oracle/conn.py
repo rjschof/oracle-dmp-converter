@@ -253,9 +253,7 @@ def configure_omf_destination(
     """
     LOGGER.info("Configuring OMF destination: DB_CREATE_FILE_DEST = %s", path)
     with conn.cursor() as cursor:
-        cursor.execute(
-            f"ALTER SYSTEM SET DB_CREATE_FILE_DEST = '{path}' SCOPE = MEMORY"
-        )
+        cursor.execute(f"ALTER SYSTEM SET DB_CREATE_FILE_DEST = '{path}' SCOPE = MEMORY")
     conn.commit()
 
 
@@ -276,8 +274,7 @@ def ensure_tablespace(conn: oracledb.Connection, tablespace: str) -> None:
     LOGGER.info("Creating tablespace %s (OMF)", tablespace)
     execute_ignore(
         conn,
-        f"CREATE TABLESPACE {oracle_identifier(tablespace)}"
-        " DATAFILE SIZE 10M AUTOEXTEND ON NEXT 10M",
+        f"CREATE TABLESPACE {oracle_identifier(tablespace)}",
         {1543},  # ORA-01543: tablespace already exists
     )
     conn.commit()

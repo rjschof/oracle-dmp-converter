@@ -25,9 +25,7 @@ CREATE_TABLE_QUOTED_RE = re.compile(
 _TABLESPACE_NAME_RE = re.compile(r'\bTABLESPACE\s+"([^"]+)"', re.IGNORECASE)
 
 # Tablespaces that always exist in Oracle Free and never need pre-creation.
-_SYSTEM_TABLESPACES: frozenset[str] = frozenset(
-    {"SYSTEM", "SYSAUX", "USERS", "TEMP", "UNDOTBS1"}
-)
+_SYSTEM_TABLESPACES: frozenset[str] = frozenset({"SYSTEM", "SYSAUX", "USERS", "TEMP", "UNDOTBS1"})
 
 # Matches the Oracle error that fires when a tablespace is referenced but missing:
 #   ORA-00959: tablespace 'MY_TS' does not exist

@@ -38,9 +38,7 @@ def disable_triggers(conn: oracledb.Connection, stage_schema: str) -> int:
         except oracledb.DatabaseError as exc:
             ora_code = exc.args[0].code if exc.args else None
             if ora_code == 4080:  # ORA-04080: trigger does not exist
-                LOGGER.debug(
-                    "Trigger %s.%s no longer exists, skipping", stage_schema, trigger_name
-                )
+                LOGGER.debug("Trigger %s.%s no longer exists, skipping", stage_schema, trigger_name)
             else:
                 LOGGER.warning(
                     "Failed to disable trigger %s.%s: %s", stage_schema, trigger_name, exc

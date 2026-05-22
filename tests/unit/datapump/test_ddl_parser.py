@@ -104,8 +104,7 @@ class TestParseMissingTablespaceFromError:
 
     def test_no_ora_00959_returns_empty(self) -> None:
         output = (
-            "IMP-00003: ORACLE error 942 encountered\n"
-            "ORA-00942: table or view does not exist\n"
+            "IMP-00003: ORACLE error 942 encountered\nORA-00942: table or view does not exist\n"
         )
         assert parse_missing_tablespace_from_error(output) == frozenset()
 
@@ -115,7 +114,7 @@ class TestParseMissingTablespaceFromError:
     def test_impdp_style_output(self) -> None:
         output = (
             "Processing object type SCHEMA_EXPORT/TABLE/TABLE\n"
-            'ORA-39083: Object type TABLE failed to create with error:\n'
+            "ORA-39083: Object type TABLE failed to create with error:\n"
             "ORA-00959: tablespace 'CUSTOM_DATA' does not exist\n"
             "Failing sql is:\n"
             'CREATE TABLE "SRC"."ORDERS" ...\n'

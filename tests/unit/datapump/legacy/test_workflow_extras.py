@@ -161,8 +161,7 @@ class TestImportAllMetadata:
         """A mix of known and unknown codes must propagate."""
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
-            "ORA-00942: table or view does not exist\n"
-            "IMP-00009: abnormal end of export file\n"
+            "ORA-00942: table or view does not exist\nIMP-00009: abnormal end of export file\n"
         )
         with pytest.raises(DataPumpError):
             wf.import_all_metadata("SRC", "STAGE")
