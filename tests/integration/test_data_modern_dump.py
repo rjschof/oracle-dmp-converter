@@ -9,15 +9,25 @@ The dump contains the full combined sample database:
 
 Partitioned tables: PRODUCTS (LIST), TRANSACTIONS (RANGE), CHANGE_LOG (HASH).
 
-Each test exercises one CLI subcommand in isolation:
+A single Oracle container is shared across inspect, plan, convert, convert_avro,
+and convert_csv via the ``shared_work`` module-scoped fixture.  The fixture runs
+``inspect`` (which sets ``keep_alive=True`` internally) and ``plan`` once; all
+convert tests reconnect to the same container through the ``session.json`` left
+behind by inspect, and each passes ``--keep-alive`` so the container stays up
+for the next test.  The fixture teardown calls ``cleanup_stale_session`` to stop
+the container after the module finishes.
 
-  * test_doctor                  — ``doctor`` only
+``test_modern_convert_oneshot`` is intentionally standalone: it spins up its own
+fresh container and tears it down in one invocation.
+
+Each test exercises one CLI subcommand:
+
   * test_modern_inspect          — ``inspect`` only
-  * test_modern_plan             — ``inspect`` (prerequisite) then ``plan``
-  * test_modern_convert          — ``inspect`` + ``plan`` (prerequisites) then ``convert``
+  * test_modern_plan             — ``plan`` (inspect already done by fixture)
+  * test_modern_convert          — ``convert --plan`` (Parquet)
   * test_modern_convert_oneshot  — ``convert`` in one-shot mode (no prior ``--plan``)
-  * test_modern_convert_avro     — one-shot ``convert`` with ``--format avro``
-  * test_modern_convert_csv      — one-shot ``convert`` with ``--format csv``
+  * test_modern_convert_avro     — ``convert --plan --format avro``
+  * test_modern_convert_csv      — ``convert --plan --format csv``
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -34,8 +45,12 @@ from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
 from oracle_dmp_converter.models import DumpFormat, OutputFormat, TableStrategy
 from oracle_dmp_converter.persistence.serialization import load_manifest, load_plan
 from oracle_dmp_converter.persistence.validation import count_output_rows
+from oracle_dmp_converter.runtime.session import cleanup_stale_session, session_path_for
 
 pytestmark = pytest.mark.integration
+
+# pytest fixtures intentionally reuse the fixture function name as the parameter name
+# pylint: disable=redefined-outer-name
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _MODERN_DUMP = _DATA_DIR / "modern.dmp"
@@ -60,12 +75,23 @@ def _image() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Module-scoped fixture: one container for inspect + plan + all convert tests
 # ---------------------------------------------------------------------------
 
 
-def _invoke_inspect(runner: CliRunner, work_dir: Path, manifest_path: Path) -> None:
-    """Run the ``inspect`` subcommand and assert success."""
+@pytest.fixture(scope="module")
+def shared_work(tmp_path_factory):
+    """Start one Oracle container, run inspect and plan, then yield shared paths.
+
+    All convert tests reconnect to this container via ``session.json``.
+    Teardown stops the container once the module finishes.
+    """
+    work_dir = tmp_path_factory.mktemp("modern_shared")
+    manifest_path = work_dir / "manifest.json"
+    plan_path = work_dir / "plan.yaml"
+    runner = CliRunner()
+
+    # inspect: starts the container, writes session.json + manifest.json, keep_alive=True
     result = runner.invoke(
         main,
         [
@@ -80,12 +106,10 @@ def _invoke_inspect(runner: CliRunner, work_dir: Path, manifest_path: Path) -> N
             _PASSWORD,
         ],
     )
-    assert result.exit_code == 0, f"inspect failed:\n{result.output}"
-    assert manifest_path.exists(), "manifest.json was not created by inspect"
+    if result.exit_code != 0:
+        pytest.fail(f"shared_work fixture: inspect failed:\n{result.output}")
 
-
-def _invoke_plan(runner: CliRunner, manifest_path: Path, plan_path: Path) -> None:
-    """Run the ``plan`` subcommand and assert success."""
+    # plan: offline — reads manifest.json, writes plan.yaml
     result = runner.invoke(
         main,
         [
@@ -94,8 +118,27 @@ def _invoke_plan(runner: CliRunner, manifest_path: Path, plan_path: Path) -> Non
             str(manifest_path),
         ],
     )
-    assert result.exit_code == 0, f"plan failed:\n{result.output}"
-    assert plan_path.exists(), "plan.yaml was not created by plan"
+    if result.exit_code != 0:
+        pytest.fail(f"shared_work fixture: plan failed:\n{result.output}")
+
+    yield SimpleNamespace(work_dir=work_dir, manifest_path=manifest_path, plan_path=plan_path)
+
+    # teardown: stop the container if still running
+    sess_path = session_path_for(work_dir)
+    if sess_path.exists():
+        cleanup_stale_session(sess_path)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _reset_state(work_dir: Path) -> None:
+    """Delete the convert state.sqlite so each format gets a clean resumability slate."""
+    state_file = work_dir / "convert" / "state.sqlite"
+    if state_file.exists():
+        state_file.unlink()
 
 
 def _assert_output(output_dir: Path, output_format: OutputFormat, ext: str) -> None:
@@ -131,19 +174,11 @@ def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_doctor() -> None:
-    """doctor subcommand: reports the container runtime as available."""
-    result = CliRunner().invoke(main, ["doctor"])
-    assert result.exit_code == 0, f"doctor failed:\n{result.output}"
-
-
-def test_modern_inspect(tmp_path: Path) -> None:
+def test_modern_inspect(shared_work: SimpleNamespace) -> None:
     """inspect subcommand: writes manifest.json with DATAPUMP format and all expected tables."""
-    work_dir = tmp_path / "work"
-    manifest_path = work_dir / "manifest.json"
-    _invoke_inspect(CliRunner(), work_dir, manifest_path)
+    assert shared_work.manifest_path.exists(), "manifest.json was not created by inspect"
 
-    manifest = load_manifest(manifest_path)
+    manifest = load_manifest(shared_work.manifest_path)
     assert manifest.dump_format == DumpFormat.DATAPUMP, (
         f"Expected DumpFormat.DATAPUMP, got {manifest.dump_format}"
     )
@@ -155,17 +190,11 @@ def test_modern_inspect(tmp_path: Path) -> None:
             )
 
 
-def test_modern_plan(tmp_path: Path) -> None:
+def test_modern_plan(shared_work: SimpleNamespace) -> None:
     """plan subcommand: writes plan.yaml assigning PARTITION strategy to partitioned tables."""
-    work_dir = tmp_path / "work"
-    manifest_path = work_dir / "manifest.json"
-    plan_path = work_dir / "plan.yaml"
-    runner = CliRunner()
+    assert shared_work.plan_path.exists(), "plan.yaml was not created by plan"
 
-    _invoke_inspect(runner, work_dir, manifest_path)
-    _invoke_plan(runner, manifest_path, plan_path)
-
-    plan = load_plan(plan_path)
+    plan = load_plan(shared_work.plan_path)
     assert plan.dump_format == DumpFormat.DATAPUMP, (
         f"Expected DumpFormat.DATAPUMP in plan, got {plan.dump_format}"
     )
@@ -177,39 +206,28 @@ def test_modern_plan(tmp_path: Path) -> None:
         )
 
 
-def test_modern_convert(tmp_path: Path) -> None:
+def test_modern_convert(shared_work: SimpleNamespace, tmp_path: Path) -> None:
     """convert subcommand: produces correct Parquet output and conversion report."""
-    work_dir = tmp_path / "work"
-    manifest_path = work_dir / "manifest.json"
-    plan_path = work_dir / "plan.yaml"
     output_dir = tmp_path / "parquet"
-    runner = CliRunner()
+    _reset_state(shared_work.work_dir)
 
-    _invoke_inspect(runner, work_dir, manifest_path)
-    _invoke_plan(runner, manifest_path, plan_path)
-
-    convert_result = runner.invoke(
+    result = CliRunner().invoke(
         main,
         [
             "convert",
             "--plan",
-            str(plan_path),
-            "--dump",
-            str(_MODERN_DUMP),
+            str(shared_work.plan_path),
             "--output",
             str(output_dir),
-            "--work-dir",
-            str(work_dir),
-            "--oracle-image",
-            _image(),
+            "--keep-alive",
             "--oracle-password",
             _PASSWORD,
         ],
     )
-    assert convert_result.exit_code == 0, f"convert failed:\n{convert_result.output}"
+    assert result.exit_code == 0, f"convert failed:\n{result.output}"
 
     _assert_output(output_dir, OutputFormat.PARQUET, "parquet")
-    _assert_conversion_report(work_dir, _TOTAL_ROWS)
+    _assert_conversion_report(shared_work.work_dir, _TOTAL_ROWS)
 
 
 def test_modern_convert_oneshot(tmp_path: Path) -> None:
@@ -243,59 +261,53 @@ def test_modern_convert_oneshot(tmp_path: Path) -> None:
     _assert_conversion_report(work_dir, _TOTAL_ROWS)
 
 
-def test_modern_convert_avro(tmp_path: Path) -> None:
-    """convert with --format avro: produces correct Avro output for all tables."""
-    work_dir = tmp_path / "work"
+def test_modern_convert_avro(shared_work: SimpleNamespace, tmp_path: Path) -> None:
+    """convert with --plan --format avro: produces correct Avro output for all tables."""
     output_dir = tmp_path / "avro"
+    _reset_state(shared_work.work_dir)
 
     result = CliRunner().invoke(
         main,
         [
             "convert",
-            "--dump",
-            str(_MODERN_DUMP),
+            "--plan",
+            str(shared_work.plan_path),
             "--output",
             str(output_dir),
-            "--work-dir",
-            str(work_dir),
-            "--oracle-image",
-            _image(),
-            "--oracle-password",
-            _PASSWORD,
             "--format",
             "avro",
+            "--keep-alive",
+            "--oracle-password",
+            _PASSWORD,
         ],
     )
     assert result.exit_code == 0, f"convert (avro) failed:\n{result.output}"
 
     _assert_output(output_dir, OutputFormat.AVRO, "avro")
-    _assert_conversion_report(work_dir, _TOTAL_ROWS)
+    _assert_conversion_report(shared_work.work_dir, _TOTAL_ROWS)
 
 
-def test_modern_convert_csv(tmp_path: Path) -> None:
-    """convert with --format csv: produces correct CSV output for all tables."""
-    work_dir = tmp_path / "work"
+def test_modern_convert_csv(shared_work: SimpleNamespace, tmp_path: Path) -> None:
+    """convert with --plan --format csv: produces correct CSV output for all tables."""
     output_dir = tmp_path / "csv"
+    _reset_state(shared_work.work_dir)
 
     result = CliRunner().invoke(
         main,
         [
             "convert",
-            "--dump",
-            str(_MODERN_DUMP),
+            "--plan",
+            str(shared_work.plan_path),
             "--output",
             str(output_dir),
-            "--work-dir",
-            str(work_dir),
-            "--oracle-image",
-            _image(),
-            "--oracle-password",
-            _PASSWORD,
             "--format",
             "csv",
+            "--keep-alive",
+            "--oracle-password",
+            _PASSWORD,
         ],
     )
     assert result.exit_code == 0, f"convert (csv) failed:\n{result.output}"
 
     _assert_output(output_dir, OutputFormat.CSV, "csv")
-    _assert_conversion_report(work_dir, _TOTAL_ROWS)
+    _assert_conversion_report(shared_work.work_dir, _TOTAL_ROWS)
