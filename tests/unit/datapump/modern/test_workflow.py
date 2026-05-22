@@ -40,7 +40,28 @@ class TestDataPumpWorkflowDumpFormat:
 
 
 class TestRequiredTablespaces:
-    def test_returns_empty_frozenset(self, tmp_path: Path) -> None:
+    def test_returns_empty_when_no_sqlfile(self, tmp_path: Path) -> None:
+        wf = _make_workflow(tmp_path)
+        # SQLFILE not yet written (discovery not run)
+        assert wf.required_tablespaces() == frozenset()
+
+    def test_returns_tablespaces_from_sqlfile(self, tmp_path: Path) -> None:
+        discovery_dir = tmp_path / "discovery"
+        discovery_dir.mkdir()
+        (discovery_dir / "discovery-impdp-sqlfile.sql").write_text(
+            'CREATE TABLE "SRC"."T" (ID NUMBER) TABLESPACE "CUSTOM_DATA";\n'
+            'CREATE TABLE "SRC"."U" (ID NUMBER) TABLESPACE "CUSTOM_IDX";\n'
+        )
+        wf = _make_workflow(tmp_path)
+        result = wf.required_tablespaces()
+        assert result == frozenset({"CUSTOM_DATA", "CUSTOM_IDX"})
+
+    def test_filters_system_tablespaces(self, tmp_path: Path) -> None:
+        discovery_dir = tmp_path / "discovery"
+        discovery_dir.mkdir()
+        (discovery_dir / "discovery-impdp-sqlfile.sql").write_text(
+            'CREATE TABLE "SRC"."T" (ID NUMBER) TABLESPACE "USERS";\n'
+        )
         wf = _make_workflow(tmp_path)
         assert wf.required_tablespaces() == frozenset()
 

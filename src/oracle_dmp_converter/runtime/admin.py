@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from oracle_dmp_converter.oracle.conn import create_directory, oracle_connection
+from oracle_dmp_converter.oracle.conn import (
+    configure_omf_destination,
+    create_directory,
+    oracle_connection,
+)
 from oracle_dmp_converter.runtime.container_oracle import ContainerOracle
 
 LOGGER = logging.getLogger(__name__)
@@ -51,6 +55,20 @@ def _connect(admin: OracleAdminConnection):
         user=admin.user,
         password=admin.password,
     )
+
+
+_DEFAULT_OMF_PATH = "/opt/oracle/oradata/FREE/FREEPDB1"
+
+
+def configure_omf(admin: OracleAdminConnection) -> None:
+    """Set ``DB_CREATE_FILE_DEST`` on the staging PDB so OMF tablespace creation works.
+
+    Must be called once after the Oracle container is ready and before any
+    :func:`~oracle_dmp_converter.oracle.conn.ensure_tablespace` call.  Uses
+    ``SCOPE=MEMORY`` so no SPFILE is required.
+    """
+    with _connect(admin) as conn:
+        configure_omf_destination(conn, _DEFAULT_OMF_PATH)
 
 
 def create_dump_directory(admin: OracleAdminConnection) -> None:

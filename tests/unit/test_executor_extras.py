@@ -10,6 +10,7 @@ import pytest
 
 from oracle_dmp_converter.config import ConverterConfig
 from oracle_dmp_converter.core.executor import StagingExecutor
+from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.models import (
     ColumnMetadata,
     DumpFormat,
@@ -259,3 +260,134 @@ class TestInspectDump:
         assert manifest.tables[0].name == "ORDERS"
         assert manifest.tables[0].schema == "MYSCHEMA"
         assert manifest.dump_format == DumpFormat.DATAPUMP
+
+
+# ---------------------------------------------------------------------------
+# _recover_missing_tablespaces
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverMissingTablespaces:
+    def test_returns_false_when_no_ora_00959(self) -> None:
+        executor = _make_executor()
+        output = "ORA-00942: table or view does not exist\n"
+        assert executor._recover_missing_tablespaces(output, "SRC") is False
+
+    def test_returns_false_for_empty_output(self) -> None:
+        executor = _make_executor()
+        assert executor._recover_missing_tablespaces("", "SRC") is False
+
+    def test_creates_tablespace_and_grants_quota(self) -> None:
+        executor = _make_executor()
+        output = "ORA-00959: tablespace 'MISSING_TS' does not exist\n"
+        _, mock_ctx = _mock_conn_ctx()
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.ensure_tablespace") as mock_ts,
+            patch("oracle_dmp_converter.core.executor.grant_quota_unlimited") as mock_quota,
+        ):
+            result = executor._recover_missing_tablespaces(output, "SRC")
+        assert result is True
+        mock_ts.assert_called_once()
+        mock_quota.assert_called_once()
+
+    def test_creates_multiple_tablespaces(self) -> None:
+        executor = _make_executor()
+        output = (
+            "ORA-00959: tablespace 'TS_ONE' does not exist\n"
+            "ORA-00959: tablespace 'TS_TWO' does not exist\n"
+        )
+        _, mock_ctx = _mock_conn_ctx()
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.ensure_tablespace") as mock_ts,
+            patch("oracle_dmp_converter.core.executor.grant_quota_unlimited") as mock_quota,
+        ):
+            result = executor._recover_missing_tablespaces(output, "SRC")
+        assert result is True
+        assert mock_ts.call_count == 2
+        assert mock_quota.call_count == 2
+
+    def test_grants_quota_to_stage_schema(self) -> None:
+        executor = _make_executor()
+        output = "ORA-00959: tablespace 'APP_TS' does not exist\n"
+        _, mock_ctx = _mock_conn_ctx()
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.ensure_tablespace"),
+            patch("oracle_dmp_converter.core.executor.grant_quota_unlimited") as mock_quota,
+        ):
+            executor._recover_missing_tablespaces(output, "MYSCHEMA")
+        quota_call_args = mock_quota.call_args[0]
+        # Second positional arg is schema name; should be the staging schema
+        assert quota_call_args[1] == "DMP_MYSCHEMA"
+
+
+# ---------------------------------------------------------------------------
+# import_table_chunk mid-import ORA-00959 recovery
+# ---------------------------------------------------------------------------
+
+
+class TestImportTableChunkTablespaceRecovery:
+    def _setup_workflow(self, dump_format: DumpFormat = DumpFormat.DATAPUMP) -> MagicMock:
+        mock_workflow = MagicMock()
+        mock_workflow.dump_format = dump_format
+        return mock_workflow
+
+    def test_recovers_and_retries_on_ora_00959(self) -> None:
+        executor = _make_executor()
+        mock_workflow = self._setup_workflow()
+        # First call raises ORA-00959, second succeeds
+        mock_workflow.import_chunk.side_effect = [
+            DataPumpError("ORA-00959: tablespace 'CUSTOM_TS' does not exist\n"),
+            None,
+        ]
+        executor._workflow = mock_workflow
+
+        _, mock_ctx = _mock_conn_ctx()
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.ensure_tablespace"),
+            patch("oracle_dmp_converter.core.executor.grant_quota_unlimited"),
+            patch("oracle_dmp_converter.core.executor.count_rows", return_value=10),
+        ):
+            result = executor.import_table_chunk(
+                source_schema="SRC", table="ORDERS", chunk_name="whole"
+            )
+        assert mock_workflow.import_chunk.call_count == 2
+        assert result == 10
+
+    def test_reraises_when_no_ora_00959(self) -> None:
+        executor = _make_executor()
+        mock_workflow = self._setup_workflow()
+        mock_workflow.import_chunk.side_effect = DataPumpError("IMP-00009: abnormal end of export")
+        executor._workflow = mock_workflow
+
+        _, mock_ctx = _mock_conn_ctx()
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
+        ):
+            with pytest.raises(DataPumpError, match="IMP-00009"):
+                executor.import_table_chunk(
+                    source_schema="SRC", table="ORDERS", chunk_name="whole"
+                )
+
+    def test_reraises_on_second_failure(self) -> None:
+        executor = _make_executor()
+        mock_workflow = self._setup_workflow()
+        mock_workflow.import_chunk.side_effect = DataPumpError(
+            "ORA-00959: tablespace 'CUSTOM_TS' does not exist\n"
+        )
+        executor._workflow = mock_workflow
+
+        _, mock_ctx = _mock_conn_ctx()
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.ensure_tablespace"),
+            patch("oracle_dmp_converter.core.executor.grant_quota_unlimited"),
+        ):
+            with pytest.raises(DataPumpError):
+                executor.import_table_chunk(
+                    source_schema="SRC", table="ORDERS", chunk_name="whole"
+                )

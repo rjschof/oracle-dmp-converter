@@ -11,6 +11,7 @@ import pytest
 from oracle_dmp_converter.oracle.conn import (
     OracleCredentials,
     _oracle_error_code,
+    configure_omf_destination,
     count_rows,
     create_directory,
     drop_schema,
@@ -284,14 +285,41 @@ class TestEnsureTablespace:
         ensure_tablespace(conn, "MY_TS")
         sql = conn.cursor.return_value.execute.call_args[0][0]
         assert "CREATE TABLESPACE" in sql
-        assert "my_ts" in sql
+        assert "MY_TS" in sql
         conn.commit.assert_called()
+
+    def test_omf_no_datafile_clause(self) -> None:
+        conn = _make_conn()
+        ensure_tablespace(conn, "MY_TS")
+        sql = conn.cursor.return_value.execute.call_args[0][0]
+        assert "DATAFILE" not in sql
 
     def test_ignores_already_exists(self) -> None:
         cursor = _make_cursor()
         cursor.execute.side_effect = _db_error(1543)
         conn = _make_conn(cursor)
         ensure_tablespace(conn, "EXISTS_TS")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# configure_omf_destination
+# ---------------------------------------------------------------------------
+
+
+class TestConfigureOmfDestination:
+    def test_sets_db_create_file_dest(self) -> None:
+        conn = _make_conn()
+        configure_omf_destination(conn, "/some/path")
+        sql = conn.cursor.return_value.execute.call_args[0][0]
+        assert "DB_CREATE_FILE_DEST" in sql
+        assert "/some/path" in sql
+        conn.commit.assert_called()
+
+    def test_uses_default_path(self) -> None:
+        conn = _make_conn()
+        configure_omf_destination(conn)
+        sql = conn.cursor.return_value.execute.call_args[0][0]
+        assert "/opt/oracle/oradata/FREE/FREEPDB1" in sql
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ import re
 
 from oracle_dmp_converter.datapump._ddl_parser import (
     CREATE_TABLE_QUOTED_RE,
+    parse_tablespace_names,
     unescape_quoted_identifier,
 )
 from oracle_dmp_converter.oracle.constants import ORACLE_MAINTAINED_SCHEMAS
@@ -36,23 +37,15 @@ LOGGER = logging.getLogger(__name__)
 # Tablespace name parser
 # ---------------------------------------------------------------------------
 
-_TABLESPACE_NAME_RE = re.compile(r'\bTABLESPACE\s+"([^"]+)"', re.IGNORECASE)
-
-# Tablespaces that always exist in Oracle Free and never need pre-creation.
-_SYSTEM_TABLESPACES = frozenset({"SYSTEM", "SYSAUX", "USERS", "TEMP", "UNDOTBS1"})
-
 
 def parse_imp_indexfile_tablespaces(sql_text: str) -> frozenset[str]:
     """Return non-system tablespace names referenced in ``imp INDEXFILE=`` DDL.
 
     Used by the legacy import path to discover custom tablespaces that must be
     pre-created in the staging Oracle instance before ``imp`` can land tables.
+    Delegates to :func:`~oracle_dmp_converter.datapump._ddl_parser.parse_tablespace_names`.
     """
-    return frozenset(
-        m.group(1).upper()
-        for m in _TABLESPACE_NAME_RE.finditer(sql_text)
-        if m.group(1).upper() not in _SYSTEM_TABLESPACES
-    )
+    return parse_tablespace_names(sql_text)
 
 
 # ---------------------------------------------------------------------------

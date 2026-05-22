@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from oracle_dmp_converter.datapump._workflow_base import DumpWorkflow
@@ -15,10 +16,32 @@ from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyIndexFileJob,
 )
 from oracle_dmp_converter.datapump.legacy.runner import LegacyRunner
+from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.models import DumpFormat
 from oracle_dmp_converter.oracle.conn import OracleCredentials
 
 LOGGER = logging.getLogger(__name__)
+
+# Error codes that imp may emit but that do not indicate a fatal failure.
+# IMP-00017: statement failed with ORACLE error (object already exists, etc.)
+# IMP-00003: ORACLE error encountered
+# ORA-00942: table or view does not exist (object skipped by imp)
+# ORA-01435: user does not exist
+_NON_FATAL_IMP_CODES: frozenset[str] = frozenset(
+    {"IMP-00017", "IMP-00003", "ORA-00942", "ORA-01435"}
+)
+
+
+def _only_non_fatal_errors(output: str) -> bool:
+    """Return True if *output* contains IMP/ORA error codes and all of them
+    are in the known non-fatal set.
+
+    An empty match (no error codes found at all) returns False so that
+    unexpected failures without recognisable codes still propagate.
+    """
+    found = set(re.findall(r"(IMP-\d+|ORA-\d+)", output))
+    return bool(found) and found.issubset(_NON_FATAL_IMP_CODES)
+
 
 _INDEXFILE_NAME = "dmpconverter-legacy-discovery.sql"
 _INDEXFILE_REMOTE = f"/tmp/{_INDEXFILE_NAME}"
@@ -167,7 +190,18 @@ class LegacyDumpWorkflow(DumpWorkflow):
             grants=False,
             constraints=False,
         )
-        self._inspect_runner.run_imp(job)
+        try:
+            self._inspect_runner.run_imp(job)
+        except DataPumpError as exc:
+            if _only_non_fatal_errors(str(exc)):
+                LOGGER.warning(
+                    "Legacy bulk metadata import for %s completed with non-fatal errors "
+                    "(IMP/ORA codes in output are all known non-fatal): %s",
+                    source_schema,
+                    str(exc)[:400],
+                )
+                return
+            raise
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import table DDL only (``rows=False``) into the staging schema."""
@@ -186,7 +220,19 @@ class LegacyDumpWorkflow(DumpWorkflow):
             grants=False,
             constraints=False,
         )
-        self._inspect_runner.run_imp(job)
+        try:
+            self._inspect_runner.run_imp(job)
+        except DataPumpError as exc:
+            if _only_non_fatal_errors(str(exc)):
+                LOGGER.warning(
+                    "Legacy metadata import for %s.%s completed with non-fatal errors "
+                    "(IMP/ORA codes in output are all known non-fatal): %s",
+                    source_schema,
+                    table,
+                    str(exc)[:400],
+                )
+                return
+            raise
 
     def import_chunk(
         self,

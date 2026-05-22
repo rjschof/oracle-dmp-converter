@@ -234,19 +234,50 @@ def count_rows(
     return int(value)
 
 
-def ensure_tablespace(
+def configure_omf_destination(
     conn: oracledb.Connection,
-    tablespace: str,
-    *,
-    datafile_dir: str = "/opt/oracle/oradata/FREE/FREEPDB1",
+    path: str = "/opt/oracle/oradata/FREE/FREEPDB1",
 ) -> None:
-    """Create *tablespace* if it does not already exist (ORA-01543 is ignored)."""
-    datafile = f"{datafile_dir}/{tablespace.lower()}01.dbf"
-    LOGGER.info("Creating tablespace %s (datafile %s)", tablespace, datafile)
+    """Set ``DB_CREATE_FILE_DEST`` so Oracle manages datafile paths automatically.
+
+    Must be called once per PDB session before any ``CREATE TABLESPACE`` that
+    omits an explicit ``DATAFILE`` clause.  ``SCOPE=MEMORY`` avoids requiring a
+    server-parameter file (SPFILE) and is sufficient for the lifetime of the
+    container instance.
+
+    Args:
+        conn: Active Oracle connection with ``ALTER SYSTEM`` privilege.
+        path: Absolute directory path inside the container where Oracle will
+            place new OMF datafiles.  Defaults to the standard Oracle Free
+            PDB data directory.
+    """
+    LOGGER.info("Configuring OMF destination: DB_CREATE_FILE_DEST = %s", path)
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"ALTER SYSTEM SET DB_CREATE_FILE_DEST = '{path}' SCOPE = MEMORY"
+        )
+    conn.commit()
+
+
+def ensure_tablespace(conn: oracledb.Connection, tablespace: str) -> None:
+    """Create *tablespace* using Oracle Managed Files if it does not already exist.
+
+    Requires ``DB_CREATE_FILE_DEST`` to be configured (see
+    :func:`configure_omf_destination`).  Oracle determines the datafile path
+    automatically; no explicit ``DATAFILE`` clause is used.
+
+    ``ORA-01543`` (tablespace already exists) is silently ignored so this
+    function is idempotent.
+
+    Args:
+        conn: Active Oracle connection with ``CREATE TABLESPACE`` privilege.
+        tablespace: Name of the tablespace to create.
+    """
+    LOGGER.info("Creating tablespace %s (OMF)", tablespace)
     execute_ignore(
         conn,
         f"CREATE TABLESPACE {oracle_identifier(tablespace)}"
-        f" DATAFILE '{datafile}' SIZE 10M AUTOEXTEND ON NEXT 10M",
+        " DATAFILE SIZE 10M AUTOEXTEND ON NEXT 10M",
         {1543},  # ORA-01543: tablespace already exists
     )
     conn.commit()

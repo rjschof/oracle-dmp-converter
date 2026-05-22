@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from oracle_dmp_converter.runtime.admin import (
+    _DEFAULT_OMF_PATH,
     DEFAULT_CONTAINER_DUMP_PATH,
     DEFAULT_DUMP_DIRECTORY,
     ORACLE_DMC_CONVERT,
@@ -12,6 +13,7 @@ from oracle_dmp_converter.runtime.admin import (
     ORACLE_DMC_INSPECT,
     OracleAdminConnection,
     admin_for_container,
+    configure_omf,
     create_dump_directory,
     create_work_dir_directories,
 )
@@ -78,3 +80,17 @@ class TestCreateWorkDirDirectories:
         assert ORACLE_DMC_DISCOVERY in directories_created
         assert ORACLE_DMC_INSPECT in directories_created
         assert ORACLE_DMC_CONVERT in directories_created
+
+
+class TestConfigureOmf:
+    def test_calls_configure_omf_destination(self) -> None:
+        admin = OracleAdminConnection("localhost", 1521, "FREE", "system", "pw")
+        mock_conn = MagicMock()
+        with (
+            patch("oracle_dmp_converter.runtime.admin.oracle_connection") as mock_ctx,
+            patch("oracle_dmp_converter.runtime.admin.configure_omf_destination") as mock_omf,
+        ):
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=mock_conn)
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            configure_omf(admin)
+        mock_omf.assert_called_once_with(mock_conn, _DEFAULT_OMF_PATH)

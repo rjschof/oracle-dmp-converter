@@ -26,6 +26,7 @@ from oracle_dmp_converter.core.staging import (
     disable_triggers,
     drop_vpd_policies,
 )
+from oracle_dmp_converter.datapump._ddl_parser import parse_missing_tablespace_from_error
 from oracle_dmp_converter.datapump._workflow_base import DumpWorkflow, WorkflowConfig
 from oracle_dmp_converter.datapump.legacy.workflow import (
     LegacyDumpWorkflow,
@@ -36,6 +37,7 @@ from oracle_dmp_converter.datapump.modern.workflow import (
     make_modern_runners,
 )
 from oracle_dmp_converter.datapump.workflow import create_workflow
+from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.models import (
     ChunkPlan,
     ConversionPlan,
@@ -211,6 +213,40 @@ class StagingExecutor:
             return frozenset()
         return self._workflow.required_tablespaces()
 
+    def _recover_missing_tablespaces(self, output: str, source_schema: str) -> bool:
+        """Parse *output* for ``ORA-00959`` errors and create any missing tablespaces.
+
+        Extracts every tablespace name from ``ORA-00959: tablespace '...' does
+        not exist`` lines, creates each tablespace (using OMF), and grants
+        ``QUOTA UNLIMITED`` on it to the staging schema.
+
+        Args:
+            output: Combined stdout+stderr text from a failed impdp/imp run
+                (typically the message of a
+                :class:`~oracle_dmp_converter.errors.DataPumpError`).
+            source_schema: Source schema name; the corresponding staging schema
+                receives ``QUOTA UNLIMITED`` on each newly created tablespace.
+
+        Returns:
+            ``True`` if one or more missing tablespaces were detected and
+            created; ``False`` if *output* contained no ``ORA-00959`` lines.
+        """
+        missing = parse_missing_tablespace_from_error(output)
+        if not missing:
+            return False
+        stage_schema = self._stage_schema_for(source_schema)
+        LOGGER.info(
+            "Recovering %d missing tablespace(s) for schema %s: %s",
+            len(missing),
+            source_schema,
+            ", ".join(sorted(missing)),
+        )
+        with self._connect() as conn:
+            for tablespace in missing:
+                ensure_tablespace(conn, tablespace)
+                grant_quota_unlimited(conn, stage_schema, tablespace)
+        return True
+
     def prepare_stage_schema(self, source_schema: str) -> None:
         stage_schema = self._stage_schema_for(source_schema)
         LOGGER.info("Ensuring staging schema %s for source %s", stage_schema, source_schema)
@@ -251,7 +287,16 @@ class StagingExecutor:
             stage_schema = self._stage_schema_for(source_schema)
             LOGGER.info("Importing metadata for schema %s -> %s", source_schema, stage_schema)
             self.prepare_stage_schema(source_schema)
-            self._require_workflow().import_all_metadata(source_schema, stage_schema)
+            try:
+                self._require_workflow().import_all_metadata(source_schema, stage_schema)
+            except DataPumpError as exc:
+                if not self._recover_missing_tablespaces(str(exc), source_schema):
+                    raise
+                LOGGER.info(
+                    "Retrying bulk metadata import for %s after tablespace recovery",
+                    source_schema,
+                )
+                self._require_workflow().import_all_metadata(source_schema, stage_schema)
             self._apply_staging_fixups(source_schema)
 
         tables: list[TableMetadata] = []
@@ -300,13 +345,30 @@ class StagingExecutor:
             with self._connect() as conn:
                 truncate_table(conn, stage_schema, table)
 
-        workflow.import_chunk(
-            source_schema=source_schema,
-            stage_schema=stage_schema,
-            table=table,
-            chunk_name=chunk_name,
-            partition_name=partition_name,
-        )
+        try:
+            workflow.import_chunk(
+                source_schema=source_schema,
+                stage_schema=stage_schema,
+                table=table,
+                chunk_name=chunk_name,
+                partition_name=partition_name,
+            )
+        except DataPumpError as exc:
+            if not self._recover_missing_tablespaces(str(exc), source_schema):
+                raise
+            LOGGER.info(
+                "Retrying chunk %s for %s.%s after tablespace recovery",
+                chunk_name,
+                source_schema,
+                table,
+            )
+            workflow.import_chunk(
+                source_schema=source_schema,
+                stage_schema=stage_schema,
+                table=table,
+                chunk_name=chunk_name,
+                partition_name=partition_name,
+            )
 
         with self._connect() as conn:
             return count_rows(conn, stage_schema, table)

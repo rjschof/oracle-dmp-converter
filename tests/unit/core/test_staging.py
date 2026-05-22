@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import oracledb
+
 from oracle_dmp_converter.core.staging import (
     apply_byte_to_char,
     dematerialize_mviews,
@@ -39,6 +41,14 @@ def _make_conn(fetchall_values: list | None = None) -> MagicMock:
     return conn
 
 
+def _make_ora_error(code: int) -> oracledb.DatabaseError:
+    """Build a minimal oracledb.DatabaseError whose first arg has a .code attribute."""
+    err_info = MagicMock()
+    err_info.code = code
+    exc = oracledb.DatabaseError(err_info)
+    return exc
+
+
 # ---------------------------------------------------------------------------
 # disable_triggers
 # ---------------------------------------------------------------------------
@@ -52,7 +62,7 @@ class TestDisableTriggers:
         conn = MagicMock()
         conn.cursor.side_effect = [discovery_cursor, action_cursor_a, action_cursor_b]
 
-        disable_triggers(conn, "MYSCHEMA")
+        count = disable_triggers(conn, "MYSCHEMA")
 
         sqls_a = action_cursor_a.execute.call_args[0][0]
         sqls_b = action_cursor_b.execute.call_args[0][0]
@@ -60,16 +70,52 @@ class TestDisableTriggers:
         assert "TRG_A" in sqls_a
         assert "DISABLE" in sqls_b
         assert "TRG_B" in sqls_b
+        assert count == 2
 
     def test_no_triggers_no_alter(self) -> None:
         cursor = _make_cursor([])
         conn = MagicMock()
         conn.cursor.return_value = cursor
 
-        disable_triggers(conn, "EMPTY_SCHEMA")
+        count = disable_triggers(conn, "EMPTY_SCHEMA")
 
         # Only the SELECT call; no ALTER calls issued
         assert cursor.execute.call_count == 1
+        assert count == 0
+
+    def test_missing_trigger_ora_04080_skipped_silently(self) -> None:
+        """ORA-04080 (trigger not found) should be skipped with no warning."""
+        discovery_cursor = _make_cursor([("TRG_GONE",)])
+        missing_cursor = _make_cursor()
+        missing_cursor.execute.side_effect = _make_ora_error(4080)
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, missing_cursor]
+
+        count = disable_triggers(conn, "MYSCHEMA")
+        assert count == 0
+
+    def test_other_error_warns_and_continues(self) -> None:
+        """Non-404080 DatabaseError should log a warning and not stop processing."""
+        discovery_cursor = _make_cursor([("TRG_BAD",), ("TRG_OK",)])
+        bad_cursor = _make_cursor()
+        bad_cursor.execute.side_effect = _make_ora_error(600)
+        good_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, bad_cursor, good_cursor]
+
+        count = disable_triggers(conn, "MYSCHEMA")
+        assert count == 1  # only TRG_OK succeeded
+
+    def test_one_missing_one_success_returns_one(self) -> None:
+        discovery_cursor = _make_cursor([("TRG_GONE",), ("TRG_OK",)])
+        missing_cursor = _make_cursor()
+        missing_cursor.execute.side_effect = _make_ora_error(4080)
+        good_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, missing_cursor, good_cursor]
+
+        count = disable_triggers(conn, "MYSCHEMA")
+        assert count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +130,12 @@ class TestDropVpdPolicies:
         conn = MagicMock()
         conn.cursor.side_effect = [discovery_cursor, action_cursor]
 
-        drop_vpd_policies(conn, "MYSCHEMA")
+        count = drop_vpd_policies(conn, "MYSCHEMA")
 
         sql = action_cursor.execute.call_args[0][0]
         assert "DROP_POLICY" in sql
         assert "DROP_GROUPED_POLICY" not in sql
+        assert count == 1
 
     def test_drops_grouped_policy(self) -> None:
         discovery_cursor = _make_cursor([("ORDERS", "POL1", "MYGROUP")])
@@ -96,19 +143,45 @@ class TestDropVpdPolicies:
         conn = MagicMock()
         conn.cursor.side_effect = [discovery_cursor, action_cursor]
 
-        drop_vpd_policies(conn, "MYSCHEMA")
+        count = drop_vpd_policies(conn, "MYSCHEMA")
 
         sql = action_cursor.execute.call_args[0][0]
         assert "DROP_GROUPED_POLICY" in sql
+        assert count == 1
 
     def test_no_policies_no_drop(self) -> None:
         cursor = _make_cursor([])
         conn = MagicMock()
         conn.cursor.return_value = cursor
 
-        drop_vpd_policies(conn, "EMPTY")
+        count = drop_vpd_policies(conn, "EMPTY")
 
         assert cursor.execute.call_count == 1  # Only the SELECT
+        assert count == 0
+
+    def test_missing_policy_ora_28102_skipped_silently(self) -> None:
+        """ORA-28102 (policy does not exist) should be skipped with no warning."""
+        discovery_cursor = _make_cursor([("ORDERS", "POL_GONE", "SYS_DEFAULT")])
+        missing_cursor = _make_cursor()
+        missing_cursor.execute.side_effect = _make_ora_error(28102)
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, missing_cursor]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+        assert count == 0
+
+    def test_other_error_warns_and_continues(self) -> None:
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL_BAD", "SYS_DEFAULT"), ("ORDERS", "POL_OK", "SYS_DEFAULT")]
+        )
+        bad_cursor = _make_cursor()
+        bad_cursor.execute.side_effect = _make_ora_error(600)
+        good_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, bad_cursor, good_cursor]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+        assert count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -165,19 +238,44 @@ class TestApplyByteToChar:
         conn = MagicMock()
         conn.cursor.side_effect = [discovery_cursor, action_cursor]
 
-        apply_byte_to_char(conn, "MYSCHEMA")
+        count = apply_byte_to_char(conn, "MYSCHEMA")
 
         sql = action_cursor.execute.call_args[0][0]
         assert "ALTER TABLE" in sql
         assert "MODIFY" in sql
         assert "CHAR" in sql
         assert "40" in sql
+        assert count == 1
 
     def test_no_byte_columns_no_alter(self) -> None:
         cursor = _make_cursor([])
         conn = MagicMock()
         conn.cursor.return_value = cursor
 
-        apply_byte_to_char(conn, "ALLCHAR")
+        count = apply_byte_to_char(conn, "ALLCHAR")
 
         assert cursor.execute.call_count == 1  # Only the SELECT
+        assert count == 0
+
+    def test_failed_alter_warns_and_continues(self) -> None:
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "COL_BAD", "VARCHAR2", 50), ("ORDERS", "COL_OK", "VARCHAR2", 30)]
+        )
+        bad_cursor = _make_cursor()
+        bad_cursor.execute.side_effect = _make_ora_error(1439)
+        good_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, bad_cursor, good_cursor]
+
+        count = apply_byte_to_char(conn, "MYSCHEMA")
+        assert count == 1  # only COL_OK succeeded
+
+    def test_all_columns_fail_returns_zero(self) -> None:
+        discovery_cursor = _make_cursor([("ORDERS", "COL_A", "VARCHAR2", 20)])
+        bad_cursor = _make_cursor()
+        bad_cursor.execute.side_effect = _make_ora_error(1439)
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, bad_cursor]
+
+        count = apply_byte_to_char(conn, "MYSCHEMA")
+        assert count == 0

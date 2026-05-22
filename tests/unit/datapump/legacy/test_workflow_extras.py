@@ -6,7 +6,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from oracle_dmp_converter.datapump.legacy.workflow import LegacyDumpWorkflow, make_legacy_runners
+from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.models import DumpFormat
 from oracle_dmp_converter.oracle.conn import OracleCredentials
 
@@ -126,6 +129,44 @@ class TestImportAllMetadata:
         job = wf._inspect_runner.run_imp.call_args[0][0]
         assert job.rows is False
 
+    def test_non_fatal_error_codes_are_swallowed(self, tmp_path: Path) -> None:
+        """A DataPumpError whose message contains only known non-fatal codes must not propagate."""
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError(
+            "IMP-00003: ORACLE error 942 encountered\n"
+            "ORA-00942: table or view does not exist\n"
+            "IMP-00017: following statement failed with ORACLE error 1435\n"
+            "ORA-01435: user does not exist\n"
+        )
+        # Should not raise
+        wf.import_all_metadata("SRC", "STAGE")
+
+    def test_fatal_error_code_is_re_raised(self, tmp_path: Path) -> None:
+        """A DataPumpError that contains an unknown code must propagate."""
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError(
+            "IMP-00009: abnormal end of export file\n"
+        )
+        with pytest.raises(DataPumpError):
+            wf.import_all_metadata("SRC", "STAGE")
+
+    def test_error_with_no_recognisable_codes_is_re_raised(self, tmp_path: Path) -> None:
+        """A DataPumpError with no IMP/ORA codes must propagate."""
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError("Connection refused")
+        with pytest.raises(DataPumpError):
+            wf.import_all_metadata("SRC", "STAGE")
+
+    def test_mixed_fatal_and_non_fatal_codes_are_re_raised(self, tmp_path: Path) -> None:
+        """A mix of known and unknown codes must propagate."""
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError(
+            "ORA-00942: table or view does not exist\n"
+            "IMP-00009: abnormal end of export file\n"
+        )
+        with pytest.raises(DataPumpError):
+            wf.import_all_metadata("SRC", "STAGE")
+
 
 class TestImportMetadata:
     def test_calls_inspect_runner_run_imp(self, tmp_path: Path) -> None:
@@ -138,6 +179,29 @@ class TestImportMetadata:
         wf.import_metadata("SRC", "STAGE", "ORDERS")
         job = wf._inspect_runner.run_imp.call_args[0][0]
         assert "ORDERS" in job.tables
+
+    def test_non_fatal_error_codes_are_swallowed(self, tmp_path: Path) -> None:
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError(
+            "IMP-00017: following statement failed with ORACLE error 942\n"
+            "ORA-00942: table or view does not exist\n"
+        )
+        # Should not raise
+        wf.import_metadata("SRC", "STAGE", "ORDERS")
+
+    def test_fatal_error_code_is_re_raised(self, tmp_path: Path) -> None:
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError(
+            "IMP-00009: abnormal end of export file\n"
+        )
+        with pytest.raises(DataPumpError):
+            wf.import_metadata("SRC", "STAGE", "ORDERS")
+
+    def test_error_with_no_recognisable_codes_is_re_raised(self, tmp_path: Path) -> None:
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError("Connection refused")
+        with pytest.raises(DataPumpError):
+            wf.import_metadata("SRC", "STAGE", "ORDERS")
 
 
 class TestImportChunk:

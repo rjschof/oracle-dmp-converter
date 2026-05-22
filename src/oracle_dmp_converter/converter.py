@@ -39,6 +39,7 @@ from oracle_dmp_converter.runtime.admin import (
     DEFAULT_CONTAINER_DUMP_PATH,
     DEFAULT_DUMP_DIRECTORY,
     admin_for_container,
+    configure_omf,
     create_dump_directory,
     create_work_dir_directories,
 )
@@ -88,6 +89,7 @@ class OracleDMPConverter:
             admin = admin_for_container(container, self.settings.oracle_password)
             create_dump_directory(admin)
             create_work_dir_directories(admin)
+            configure_omf(admin)
             self._container = container
             self._executor = StagingExecutor(
                 container=container,

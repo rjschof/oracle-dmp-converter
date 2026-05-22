@@ -130,6 +130,7 @@ def test_context_manager_uses_single_seam(tmp_path: Path) -> None:
         patch("oracle_dmp_converter.converter.admin_for_container") as mock_admin,
         patch("oracle_dmp_converter.converter.create_dump_directory"),
         patch("oracle_dmp_converter.converter.create_work_dir_directories"),
+        patch("oracle_dmp_converter.converter.configure_omf"),
     ):
         mock_admin.return_value = MagicMock()
         with OracleDMPConverter(settings) as converter:

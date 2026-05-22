@@ -13,11 +13,16 @@ from oracle_dmp_converter.datapump.modern.parfile import (
     SqlFileJob,
 )
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
-from oracle_dmp_converter.datapump.modern.sqlfile import parse_sqlfile_tables
+from oracle_dmp_converter.datapump.modern.sqlfile import (
+    parse_sqlfile_tables,
+    parse_sqlfile_tablespaces,
+)
 from oracle_dmp_converter.models import DumpFormat
 from oracle_dmp_converter.oracle.conn import OracleCredentials
 
 LOGGER = logging.getLogger(__name__)
+
+_SQLFILE_NAME = "discovery-impdp-sqlfile.sql"
 
 
 class DataPumpWorkflow(DumpWorkflow):
@@ -97,7 +102,7 @@ class DataPumpWorkflow(DumpWorkflow):
         DIRECTORY object :attr:`_discovery_directory`), then reads and parses
         that file.  Oracle also writes its own log file to the same directory.
         """
-        sqlfile_name = "discovery-impdp-sqlfile.sql"
+        sqlfile_name = _SQLFILE_NAME
         job = SqlFileJob(
             connection=self._credentials,
             directory=self._directory,
@@ -108,7 +113,7 @@ class DataPumpWorkflow(DumpWorkflow):
         LOGGER.info("Running impdp SQLFILE discovery (sqlfile=%s)", sqlfile_name)
         self._discovery_runner.run_sqlfile(job)
 
-        sqlfile_path = self._discovery_dir / sqlfile_name
+        sqlfile_path = self._discovery_dir / _SQLFILE_NAME
         sql_text = sqlfile_path.read_text() if sqlfile_path.exists() else ""
 
         tables = parse_sqlfile_tables(sql_text)
@@ -116,8 +121,16 @@ class DataPumpWorkflow(DumpWorkflow):
         return tables
 
     def required_tablespaces(self) -> frozenset[str]:
-        """Modern Data Pump imports never require pre-created tablespaces."""
-        return frozenset()
+        """Return custom tablespaces referenced in the SQLFILE DDL.
+
+        Reads the DDL file written by the most recent ``impdp SQLFILE=``
+        discovery run (if it exists) and extracts non-system tablespace names.
+        Returns an empty :class:`frozenset` when discovery has not yet run.
+        """
+        sqlfile_path = self._discovery_dir / _SQLFILE_NAME
+        if not sqlfile_path.exists():
+            return frozenset()
+        return parse_sqlfile_tablespaces(sqlfile_path.read_text())
 
     def import_all_metadata(self, source_schema: str, stage_schema: str) -> None:
         """Import DDL for all tables in *source_schema* via a single ``impdp`` call.
