@@ -4,7 +4,7 @@ The dump contains the full combined sample database:
 
     HRDATA:     DEPARTMENTS(5), JOBS(10), EMPLOYEES(30)
     INVENTORY:  WAREHOUSES(3), PRODUCTS(24), STOCK_LEVELS(45)
-    FINANCE:    ACCOUNTS(20), TRANSACTIONS(100)
+    FINANCE:    ACCOUNTS(20), TRANSACTIONS(100), MV_ACCOUNT_SUMMARY(20)
     AUDITLOG:   CHANGE_LOG(50)
 
 Legacy exp format forces WHOLE_TABLE strategy for every table (no HASH or PARTITION).
@@ -43,10 +43,10 @@ _LEGACY_DUMP = _DATA_DIR / "legacy.dmp"
 _EXPECTED_ROWS: dict[str, dict[str, int]] = {
     "HRDATA": {"DEPARTMENTS": 5, "JOBS": 10, "EMPLOYEES": 30},
     "INVENTORY": {"WAREHOUSES": 3, "PRODUCTS": 24, "STOCK_LEVELS": 45},
-    "FINANCE": {"ACCOUNTS": 20, "TRANSACTIONS": 100},
+    "FINANCE": {"ACCOUNTS": 20, "TRANSACTIONS": 100, "MV_ACCOUNT_SUMMARY": 20},
     "AUDITLOG": {"CHANGE_LOG": 50},
 }
-_TOTAL_ROWS = sum(n for tbl in _EXPECTED_ROWS.values() for n in tbl.values())
+_TOTAL_ROWS = 307
 
 _PASSWORD = "OraclePwd_123"
 

@@ -44,7 +44,7 @@ _MODERN_DUMP = _DATA_DIR / "modern.dmp"
 _EXPECTED_ROWS: dict[str, dict[str, int]] = {
     "HRDATA": {"DEPARTMENTS": 5, "JOBS": 10, "EMPLOYEES": 30},
     "INVENTORY": {"WAREHOUSES": 3, "PRODUCTS": 24, "STOCK_LEVELS": 45},
-    "FINANCE": {"ACCOUNTS": 20, "TRANSACTIONS": 100},
+    "FINANCE": {"ACCOUNTS": 20, "TRANSACTIONS": 100, "MV_ACCOUNT_SUMMARY": 20},
     "AUDITLOG": {"CHANGE_LOG": 50},
 }
 _TOTAL_ROWS = sum(n for tbl in _EXPECTED_ROWS.values() for n in tbl.values())
