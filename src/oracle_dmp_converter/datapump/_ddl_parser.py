@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 
+from oracle_dmp_converter.datapump.error_parser import extract_missing_tablespaces
+
 # Matches schema-qualified quoted identifiers in CREATE TABLE statements:
 #   CREATE TABLE "SCHEMA"."TABLE" (...)
 #   CREATE GLOBAL TEMPORARY TABLE "SCHEMA"."TABLE" (...)
@@ -26,13 +28,6 @@ _TABLESPACE_NAME_RE = re.compile(r'\bTABLESPACE\s+"([^"]+)"', re.IGNORECASE)
 
 # Tablespaces that always exist in Oracle Free and never need pre-creation.
 _SYSTEM_TABLESPACES: frozenset[str] = frozenset({"SYSTEM", "SYSAUX", "USERS", "TEMP", "UNDOTBS1"})
-
-# Matches the Oracle error that fires when a tablespace is referenced but missing:
-#   ORA-00959: tablespace 'MY_TS' does not exist
-_MISSING_TABLESPACE_RE = re.compile(
-    r"ORA-00959:\s+tablespace\s+'([^']+)'\s+does\s+not\s+exist",
-    re.IGNORECASE,
-)
 
 
 def unescape_quoted_identifier(value: str) -> str:
@@ -68,12 +63,12 @@ def parse_tablespace_names(sql_text: str) -> frozenset[str]:
 def parse_missing_tablespace_from_error(output: str) -> frozenset[str]:
     """Extract tablespace names from ``ORA-00959`` error messages.
 
-    Parses lines of the form::
-
-        ORA-00959: tablespace 'MY_TS' does not exist
-
-    from impdp / imp output (typically captured as the body of a
-    :class:`~oracle_dmp_converter.errors.DataPumpError`).
+    Thin wrapper around
+    :func:`~oracle_dmp_converter.datapump.error_parser.extract_missing_tablespaces`
+    preserved for back-compat with callers that import this symbol.  New code
+    should prefer the dispatcher in
+    :mod:`oracle_dmp_converter.datapump.error_parser`, which can also group
+    failures by their originating object.
 
     Args:
         output: Combined stdout+stderr text from an impdp or imp invocation.
@@ -82,4 +77,4 @@ def parse_missing_tablespace_from_error(output: str) -> frozenset[str]:
         A :class:`frozenset` of uppercase tablespace names that are reported
         missing.  Empty if no ``ORA-00959`` lines are found.
     """
-    return frozenset(m.group(1).upper() for m in _MISSING_TABLESPACE_RE.finditer(output))
+    return frozenset(extract_missing_tablespaces(output))

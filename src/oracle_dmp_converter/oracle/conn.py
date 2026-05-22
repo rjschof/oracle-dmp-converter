@@ -240,10 +240,10 @@ def configure_omf_destination(
 ) -> None:
     """Set ``DB_CREATE_FILE_DEST`` so Oracle manages datafile paths automatically.
 
-    Must be called once per PDB session before any ``CREATE TABLESPACE`` that
-    omits an explicit ``DATAFILE`` clause.  ``SCOPE=MEMORY`` avoids requiring a
-    server-parameter file (SPFILE) and is sufficient for the lifetime of the
-    container instance.
+    Thin shim that delegates to
+    :func:`oracle_dmp_converter.oracle.omf.ensure_db_create_file_dest`.  Kept
+    for back-compat with call sites that import this symbol from
+    :mod:`oracle_dmp_converter.oracle.conn`.
 
     Args:
         conn: Active Oracle connection with ``ALTER SYSTEM`` privilege.
@@ -251,33 +251,33 @@ def configure_omf_destination(
             place new OMF datafiles.  Defaults to the standard Oracle Free
             PDB data directory.
     """
-    LOGGER.info("Configuring OMF destination: DB_CREATE_FILE_DEST = %s", path)
-    with conn.cursor() as cursor:
-        cursor.execute(f"ALTER SYSTEM SET DB_CREATE_FILE_DEST = '{path}' SCOPE = MEMORY")
-    conn.commit()
+    # Local import avoids a hard module-load dependency cycle if any code
+    # in oracle/ ever imports conn.py at import time.
+    # pylint: disable=import-outside-toplevel
+    from oracle_dmp_converter.oracle.omf import (  # noqa: PLC0415
+        ensure_db_create_file_dest,
+    )
+
+    ensure_db_create_file_dest(conn, path)
 
 
 def ensure_tablespace(conn: oracledb.Connection, tablespace: str) -> None:
     """Create *tablespace* using Oracle Managed Files if it does not already exist.
 
-    Requires ``DB_CREATE_FILE_DEST`` to be configured (see
-    :func:`configure_omf_destination`).  Oracle determines the datafile path
-    automatically; no explicit ``DATAFILE`` clause is used.
-
-    ``ORA-01543`` (tablespace already exists) is silently ignored so this
-    function is idempotent.
+    Thin shim that delegates to
+    :func:`oracle_dmp_converter.oracle.omf.create_tablespace_if_missing` while
+    preserving the historical ``ORA-01543 -> ignore`` idempotency.
 
     Args:
         conn: Active Oracle connection with ``CREATE TABLESPACE`` privilege.
         tablespace: Name of the tablespace to create.
     """
-    LOGGER.info("Creating tablespace %s (OMF)", tablespace)
-    execute_ignore(
-        conn,
-        f"CREATE TABLESPACE {oracle_identifier(tablespace)}",
-        {1543},  # ORA-01543: tablespace already exists
+    # pylint: disable=import-outside-toplevel
+    from oracle_dmp_converter.oracle.omf import (  # noqa: PLC0415
+        create_tablespace_if_missing,
     )
-    conn.commit()
+
+    create_tablespace_if_missing(conn, tablespace)
 
 
 def grant_quota_unlimited(conn: oracledb.Connection, schema: str, tablespace: str) -> None:

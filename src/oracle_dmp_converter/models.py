@@ -271,6 +271,20 @@ class ContainerSession:
             inside the container.
         version: Session schema version; currently always ``1``.
         created_at: ISO 8601 timestamp of when the session was created.
+        metadata_imported: ``True`` once the ``inspect`` phase has finished
+            importing dump metadata (including any auto-created tablespaces
+            and prepared staging schemas) into the running container.
+            Persisted so that a later ``convert`` invocation can detect a
+            container that has been restarted between phases and refuse to
+            proceed against an empty database.
+        metadata_import_time: ISO 8601 UTC timestamp of when
+            *metadata_imported* was last flipped to ``True``.  Empty string
+            when metadata has never been imported.
+        prepared_schemas: Frozen set of staging schema names (already
+            ``DMP_``-prefixed) that the inspect phase created, granted
+            privileges to and verified.  Used by the ``convert`` phase to
+            short-circuit re-creation when reconnecting to a still-warm
+            container.
     """
 
     container_name: str
@@ -281,6 +295,9 @@ class ContainerSession:
     dump_dir: str
     version: int = 1
     created_at: str = ""
+    metadata_imported: bool = False
+    metadata_import_time: str = ""
+    prepared_schemas: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)

@@ -63,9 +63,18 @@ def _podman_socket_url() -> str | None:
        ``podman system service`` on Linux when running as a non-root user).
     2. **Explicit temp socket** — ``/tmp/podman.sock`` (common when the service
        is started with ``podman system service unix:///tmp/podman.sock``).
-    3. **Podman Machine** (macOS / Windows) — ``podman machine inspect`` output.
+    3. **Sanity check** — if neither socket file exists, confirm the
+       ``podman`` CLI itself is callable before paying the cost of the
+       ``podman machine inspect`` JSON parse below.  When ``podman version``
+       fails (binary missing, broken install) we bail out early with
+       ``None`` so the caller can fall back to the default Docker socket.
+    4. **Podman Machine** (macOS / Windows) — ``podman machine inspect``
+       output.  This is the slowest probe and is only reached when no
+       on-disk socket exists.
     """
-    # 1. Linux rootless socket via XDG_RUNTIME_DIR
+    # 1+2. Cheap on-disk socket checks first — these are the common case on
+    # Linux and on macOS once a machine is already running and its socket has
+    # been symlinked into XDG_RUNTIME_DIR.
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     for candidate in (
         Path(xdg_runtime) / "podman" / "podman.sock",
@@ -74,7 +83,22 @@ def _podman_socket_url() -> str | None:
         if candidate.exists():
             return f"unix://{candidate}"
 
-    # 2. Podman Machine (macOS / Windows)
+    # 3. Sanity-check the CLI is present before invoking ``machine inspect``.
+    # ``podman version`` is the cheapest verb that exits 0 on a healthy
+    # install and non-zero (or raises FileNotFoundError) otherwise.
+    try:
+        version_result = subprocess.run(
+            ["podman", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, FileNotFoundError):
+        return None
+    if version_result.returncode != 0:
+        return None
+
+    # 4. Podman Machine (macOS / Windows)
     try:
         result = subprocess.run(
             ["podman", "machine", "inspect"],

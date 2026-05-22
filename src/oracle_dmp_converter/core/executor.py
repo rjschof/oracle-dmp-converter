@@ -128,6 +128,22 @@ class StagingExecutor:
         self.output_format = output_format
         self.config = config if config is not None else ConverterConfig()
         self._workflow: DumpWorkflow | None = None
+        # Names of tablespaces that this executor has already created (or
+        # confirmed exist) in the running container.  Used by
+        # :meth:`_recover_missing_tablespaces` to avoid a redundant
+        # ``CREATE TABLESPACE`` round-trip when an earlier chunk already
+        # triggered the same recovery.
+        self._created_tablespaces: set[str] = set()
+        # Source schemas whose staging counterpart has been prepared
+        # (created, granted quotas) during this executor's lifetime.  Mirrored
+        # into ``ContainerSession.prepared_schemas`` on shutdown.
+        self._prepared_schemas: set[str] = set()
+        # True after :meth:`inspect_dump` has successfully imported metadata
+        # for every discovered schema.  Persisted into
+        # ``ContainerSession.metadata_imported`` so a later ``convert`` run
+        # can call :meth:`validate_metadata_state` to detect a stale or
+        # restarted container before doing any work.
+        self.metadata_imported: bool = False
 
     @property
     def dump_format(self) -> DumpFormat:
@@ -218,8 +234,14 @@ class StagingExecutor:
         """Parse *output* for ``ORA-00959`` errors and create any missing tablespaces.
 
         Extracts every tablespace name from ``ORA-00959: tablespace '...' does
-        not exist`` lines, creates each tablespace (using OMF), and grants
-        ``QUOTA UNLIMITED`` on it to the staging schema.
+        not exist`` lines, creates each tablespace that has not already been
+        created during this executor's lifetime (using OMF), and grants
+        ``QUOTA UNLIMITED`` on every reported tablespace to the staging
+        schema.
+
+        The created-tablespace cache (:attr:`_created_tablespaces`) means a
+        flurry of failing chunks that all hit the same missing tablespace
+        only triggers one ``CREATE TABLESPACE`` round-trip per name.
 
         Args:
             output: Combined stdout+stderr text from a failed impdp/imp run
@@ -230,21 +252,63 @@ class StagingExecutor:
 
         Returns:
             ``True`` if one or more missing tablespaces were detected and
-            created; ``False`` if *output* contained no ``ORA-00959`` lines.
+            an action (create or grant) was performed; ``False`` if *output*
+            contained no ``ORA-00959`` lines.
         """
         missing = parse_missing_tablespace_from_error(output)
         if not missing:
             return False
         stage_schema = self._stage_schema_for(source_schema)
+        to_create = sorted(missing - self._created_tablespaces)
         LOGGER.info(
-            "Recovering %d missing tablespace(s) for schema %s: %s",
+            "Recovering %d missing tablespace(s) for schema %s (%d new, %d cached): %s",
             len(missing),
             source_schema,
+            len(to_create),
+            len(missing) - len(to_create),
             ", ".join(sorted(missing)),
         )
         with self._connect() as conn:
-            for tablespace in missing:
+            for tablespace in to_create:
                 ensure_tablespace(conn, tablespace)
+                self._created_tablespaces.add(tablespace)
+            for tablespace in sorted(missing):
+                grant_quota_unlimited(conn, stage_schema, tablespace)
+        return True
+
+    def _recover_missing_quota(self, output: str, source_schema: str) -> bool:
+        """Parse *output* for ``ORA-01950`` and grant unlimited quota where needed.
+
+        ``ORA-01950: no privileges on tablespace 'X'`` fires when a staging
+        schema lacks quota on a tablespace referenced by an inbound DDL.
+        We grant ``QUOTA UNLIMITED`` on each named tablespace to the staging
+        schema and report whether any action was taken.
+        """
+        # ORA-01950 messages always carry the tablespace name in single quotes
+        # immediately after the ``tablespace`` keyword.  Re-use the same
+        # regex shape as ORA-00959 since the surrounding text differs.
+        # pylint: disable=import-outside-toplevel
+        import re  # noqa: PLC0415 - keep the import local to the recovery path.
+
+        names = {
+            m.group(1).upper()
+            for m in re.finditer(
+                r"ORA-01950:\s+no\s+privileges\s+on\s+tablespace\s+'([^']+)'",
+                output,
+                re.IGNORECASE,
+            )
+        }
+        if not names:
+            return False
+        stage_schema = self._stage_schema_for(source_schema)
+        LOGGER.info(
+            "Granting QUOTA UNLIMITED to %s on %d tablespace(s): %s",
+            stage_schema,
+            len(names),
+            ", ".join(sorted(names)),
+        )
+        with self._connect() as conn:
+            for tablespace in sorted(names):
                 grant_quota_unlimited(conn, stage_schema, tablespace)
         return True
 
@@ -255,7 +319,9 @@ class StagingExecutor:
             ensure_schema(conn, stage_schema, self.stage_password)
             for tablespace in self._required_tablespaces():
                 ensure_tablespace(conn, tablespace)
+                self._created_tablespaces.add(tablespace)
                 grant_quota_unlimited(conn, stage_schema, tablespace)
+        self._prepared_schemas.add(stage_schema)
 
     def drop_stage_schema(self, source_schema: str) -> None:
         stage_schema = self._stage_schema_for(source_schema)
@@ -354,11 +420,145 @@ class StagingExecutor:
                     unique_keys=metadata.unique_keys,
                 )
             )
+        self.metadata_imported = True
         return DumpManifest(
             dump_paths=self.dumpfiles,
             tables=tuple(tables),
             dump_format=self._workflow.dump_format,
         )
+
+    def get_prepared_schemas(self) -> frozenset[str]:
+        """Return the staging schemas this executor has prepared so far.
+
+        Mirrored into :attr:`ContainerSession.prepared_schemas` when
+        :meth:`OracleDMPConverter.stop` runs with ``keep_alive=True`` so a
+        later ``convert`` reconnect can short-circuit re-creation.
+        """
+        return frozenset(self._prepared_schemas)
+
+    def validate_metadata_state(self, plan: ConversionPlan) -> None:
+        """Verify the running container still holds the inspect-time state.
+
+        When :attr:`metadata_imported` is ``False`` this returns immediately;
+        the caller has signalled that inspect has not run against this
+        executor (e.g. ``convert`` invoked against a freshly created container
+        with no prior inspect phase, in which case ``convert_plan`` will
+        prepare schemas lazily).
+
+        Otherwise we walk *plan*'s supported tables and confirm:
+
+        1. The staging user ``DMP_<schema>`` exists in ``dba_users``.
+        2. The staging table ``DMP_<schema>.<table>`` exists in ``dba_tables``.
+
+        Either failure raises :class:`ValueError` with a remediation hint
+        ("re-run inspect") so we fail fast at the start of convert rather
+        than partway through with a cryptic Oracle error.
+        """
+        if not self.metadata_imported:
+            return
+        supported = [tp for tp in plan.tables if tp.strategy != TableStrategy.UNSUPPORTED]
+        if not supported:
+            return
+        missing_users: set[str] = set()
+        missing_tables: list[str] = []
+        with self._connect() as conn:
+            wanted_users = {self._stage_schema_for(tp.schema) for tp in supported}
+            with conn.cursor() as cursor:
+                # Bind variables would require dynamic IN-list construction;
+                # validate per-name with a single small query each so the
+                # connection round-trips stay bounded by |wanted_users|.
+                for user in sorted(wanted_users):
+                    cursor.execute(
+                        "SELECT 1 FROM dba_users WHERE username = :u",
+                        {"u": user},
+                    )
+                    if cursor.fetchone() is None:
+                        missing_users.add(user)
+            for tp in supported:
+                stage_schema = self._stage_schema_for(tp.schema)
+                if stage_schema in missing_users:
+                    missing_tables.append(f"{stage_schema}.{tp.table}")
+                    continue
+                if not table_exists(conn, stage_schema, tp.table):
+                    missing_tables.append(f"{stage_schema}.{tp.table}")
+        if missing_users or missing_tables:
+            details: list[str] = []
+            if missing_users:
+                details.append("missing staging users: " + ", ".join(sorted(missing_users)))
+            if missing_tables:
+                details.append("missing staging tables: " + ", ".join(missing_tables))
+            raise ValueError(
+                "Container state does not match inspect manifest ("
+                + "; ".join(details)
+                + "). Re-run inspect before convert."
+            )
+
+    def _import_chunk_with_recovery(
+        self,
+        *,
+        source_schema: str,
+        stage_schema: str,
+        table: str,
+        chunk_name: str,
+        partition_name: str | None,
+        max_attempts: int = 3,
+    ) -> None:
+        """Import a single chunk, retrying after tablespace / quota recovery.
+
+        On each failed attempt the recovery helpers inspect the
+        :class:`DataPumpError` output:
+
+        * :meth:`_recover_missing_tablespaces` handles ``ORA-00959``
+          (missing tablespace) by creating the tablespace via OMF and
+          granting unlimited quota to *stage_schema*.
+        * :meth:`_recover_missing_quota` handles ``ORA-01950`` (no
+          privileges) by granting unlimited quota on the offending
+          tablespace.
+
+        If neither recovery applies, or *max_attempts* is exhausted, the
+        original :class:`DataPumpError` is re-raised so the caller's state
+        tracking still records the failure.
+        """
+        workflow = self._require_workflow()
+        last_exc: DataPumpError | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                workflow.import_chunk(
+                    source_schema=source_schema,
+                    stage_schema=stage_schema,
+                    table=table,
+                    chunk_name=chunk_name,
+                    partition_name=partition_name,
+                )
+                return
+            except DataPumpError as exc:
+                last_exc = exc
+                output = str(exc)
+                recovered = self._recover_missing_tablespaces(output, source_schema)
+                recovered |= self._recover_missing_quota(output, source_schema)
+                if not recovered:
+                    raise
+                if attempt == max_attempts:
+                    LOGGER.error(
+                        "Chunk %s for %s.%s still failing after %d recovery attempt(s)",
+                        chunk_name,
+                        source_schema,
+                        table,
+                        attempt,
+                    )
+                    raise
+                LOGGER.info(
+                    "Retrying chunk %s for %s.%s (attempt %d/%d) after recovery",
+                    chunk_name,
+                    source_schema,
+                    table,
+                    attempt + 1,
+                    max_attempts,
+                )
+        # Defensive: loop exits via return or raise; reachable only if
+        # max_attempts <= 0, which is not a supported caller contract.
+        assert last_exc is not None
+        raise last_exc
 
     def import_table_chunk(
         self,
@@ -375,30 +575,13 @@ class StagingExecutor:
             with self._connect() as conn:
                 truncate_table(conn, stage_schema, table)
 
-        try:
-            workflow.import_chunk(
-                source_schema=source_schema,
-                stage_schema=stage_schema,
-                table=table,
-                chunk_name=chunk_name,
-                partition_name=partition_name,
-            )
-        except DataPumpError as exc:
-            if not self._recover_missing_tablespaces(str(exc), source_schema):
-                raise
-            LOGGER.info(
-                "Retrying chunk %s for %s.%s after tablespace recovery",
-                chunk_name,
-                source_schema,
-                table,
-            )
-            workflow.import_chunk(
-                source_schema=source_schema,
-                stage_schema=stage_schema,
-                table=table,
-                chunk_name=chunk_name,
-                partition_name=partition_name,
-            )
+        self._import_chunk_with_recovery(
+            source_schema=source_schema,
+            stage_schema=stage_schema,
+            table=table,
+            chunk_name=chunk_name,
+            partition_name=partition_name,
+        )
 
         with self._connect() as conn:
             return count_rows(conn, stage_schema, table)

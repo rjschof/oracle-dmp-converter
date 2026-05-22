@@ -315,6 +315,9 @@ def save_session(path: Path, session: ContainerSession) -> None:
         "work_dir": session.work_dir,
         "dump_dir": session.dump_dir,
         "created_at": session.created_at,
+        "metadata_imported": session.metadata_imported,
+        "metadata_import_time": session.metadata_import_time,
+        "prepared_schemas": sorted(session.prepared_schemas),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -338,4 +341,7 @@ def load_session(path: Path) -> ContainerSession:
         work_dir=str(data.get("work_dir") or ""),
         dump_dir=str(data.get("dump_dir") or ""),
         created_at=str(data.get("created_at") or ""),
+        metadata_imported=bool(data.get("metadata_imported", False)),
+        metadata_import_time=str(data.get("metadata_import_time") or ""),
+        prepared_schemas=frozenset(str(name) for name in (data.get("prepared_schemas") or ())),
     )

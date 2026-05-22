@@ -36,6 +36,16 @@ def _only_non_fatal_errors(output: str) -> bool:
     """Return True if *output* contains IMP/ORA error codes and all of them
     are in the known non-fatal set.
 
+    Legacy ``imp`` is chatty: it routinely reports things like
+    ``ORA-00942: table or view does not exist`` (skipped object) and
+    ``IMP-00017`` (statement-level failure) alongside genuinely fatal errors.
+    Distinguishing the two is intentionally kept at the workflow layer
+    (rather than baked into :class:`LegacyRunner`) because the policy is
+    workflow-shaped: ``import_all_metadata`` accepts dirty output as long as
+    everything that did fail is in :data:`_NON_FATAL_IMP_CODES`, whereas a
+    future caller (e.g. strict re-import for validation) could choose a
+    different tolerance without touching the low-level runner.
+
     An empty match (no error codes found at all) returns False so that
     unexpected failures without recognisable codes still propagate.
     """
@@ -44,7 +54,11 @@ def _only_non_fatal_errors(output: str) -> bool:
 
 
 _INDEXFILE_NAME = "dmpconverter-legacy-discovery.sql"
-_INDEXFILE_REMOTE = f"/tmp/{_INDEXFILE_NAME}"
+# Write the indexfile straight into the rw-mounted work-dir discovery directory
+# (host: ``<work_dir>/discovery``, container: ``/work/discovery``).  This avoids
+# the historical ``/tmp`` fallback dance: imp's output is immediately visible
+# to the host without an extra ``docker cp`` / ``cat`` round-trip.
+_INDEXFILE_REMOTE = f"/work/discovery/{_INDEXFILE_NAME}"
 _DISCOVERY_LOG = "dmpconverter-legacy-discovery.log"
 
 
@@ -109,8 +123,14 @@ class LegacyDumpWorkflow(DumpWorkflow):
     def _indexfile_sql(self) -> str:
         """Run ``imp INDEXFILE=`` once and cache the DDL text.
 
-        Falls back to reading from the directory path if ``/tmp`` does not
-        contain the indexfile (some Oracle versions write it there instead).
+        The indexfile is written into the rw-mounted work-dir discovery
+        directory (``/work/discovery`` inside the container,
+        ``<work_dir>/discovery`` on the host), so the SQL text is readable
+        without any extra container round-trip.  If the runner returns an
+        empty string we raise :class:`DataPumpError` rather than falling
+        back to a ``cat`` shell-out, because an empty indexfile always
+        indicates a real failure (missing dump, wrong credentials, imp
+        bailed out) that the caller needs to see.
 
         Saves ``discovery-imp-indexfile.log`` (subprocess stdout+stderr) and
         ``discovery-imp-indexfile.sql`` (the indexfile DDL) into
@@ -134,13 +154,12 @@ class LegacyDumpWorkflow(DumpWorkflow):
         sql_text, log_output = self._discovery_runner.run_imp_indexfile(job)
 
         if not sql_text:
-            LOGGER.debug(
-                "INDEXFILE not found at %s; trying dump directory fallback", _INDEXFILE_REMOTE
+            (self._discovery_dir / "discovery-imp-indexfile.log").write_text(log_output)
+            raise DataPumpError(
+                "imp INDEXFILE discovery produced no SQL output. "
+                f"See {self._discovery_dir / 'discovery-imp-indexfile.log'} for details.\n"
+                + log_output
             )
-            alt = self._discovery_runner.container.exec(
-                ["cat", f"{self._directory_path}/{_INDEXFILE_NAME}"], check=False
-            )
-            sql_text = alt.stdout if alt.returncode == 0 else ""
 
         LOGGER.info("imp INDEXFILE discovery complete (%d chars of DDL)", len(sql_text))
 

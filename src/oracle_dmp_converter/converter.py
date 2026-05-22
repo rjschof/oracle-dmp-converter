@@ -46,6 +46,7 @@ from oracle_dmp_converter.runtime.admin import (
 from oracle_dmp_converter.runtime.container_oracle import ContainerOracle
 from oracle_dmp_converter.runtime.session import (
     cleanup_stale_session,
+    load_session_if_exists,
     session_path_for,
     write_session,
 )
@@ -101,6 +102,16 @@ class OracleDMPConverter:
                 output_format=self.settings.output_format,
                 config=self.settings.config,
             )
+            # If a prior phase left a session.json behind, seed the executor
+            # with the recorded ``metadata_imported`` flag and previously
+            # prepared staging schemas so that ``validate_metadata_state``
+            # and ``get_prepared_schemas`` reflect cross-invocation state.
+            if self._session_existed_at_start:
+                session = load_session_if_exists(session_path)
+                if session is not None:
+                    self._executor.metadata_imported = session.metadata_imported
+                    # pylint: disable-next=protected-access
+                    self._executor._prepared_schemas = set(session.prepared_schemas)  # noqa: SLF001
         except Exception:
             try:
                 container.stop()
@@ -116,6 +127,7 @@ class OracleDMPConverter:
         session_path = session_path_for(self.settings.work_dir)
         try:
             if self.settings.keep_alive:
+                executor = self._executor
                 write_session(
                     session_path,
                     container=container,
@@ -123,6 +135,12 @@ class OracleDMPConverter:
                     oracle_image=self.settings.oracle_image,
                     work_dir=self.settings.work_dir,
                     dump_dir=self.settings.dump_dir,
+                    metadata_imported=(
+                        executor.metadata_imported if executor is not None else False
+                    ),
+                    prepared_schemas=(
+                        executor.get_prepared_schemas() if executor is not None else None
+                    ),
                 )
                 LOGGER.info(
                     "Container %s kept alive (keep_alive=True); session at %s",
@@ -234,6 +252,11 @@ class OracleDMPConverter:
         # pylint: disable-next=protected-access
         if executor._workflow is None:  # noqa: SLF001
             executor.use_format(plan.dump_format)
+
+        # Fail fast if the running container's staging state does not match
+        # what the inspect phase recorded (e.g. container restarted between
+        # phases).  Method is a no-op when metadata_imported is False.
+        executor.validate_metadata_state(plan)
 
         state_store = StateStore(self.settings.work_dir / "convert" / "state.sqlite")
         try:

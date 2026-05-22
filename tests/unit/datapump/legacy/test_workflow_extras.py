@@ -78,18 +78,19 @@ class TestDiscoverTables:
         wf.discover_tables()
         wf._discovery_runner.run_imp_indexfile.assert_called_once()
 
-    def test_falls_back_to_directory_path_when_indexfile_empty(self, tmp_path: Path) -> None:
+    def test_empty_indexfile_raises_data_pump_error(self, tmp_path: Path) -> None:
+        """An empty indexfile is always a real failure and must be surfaced.
+
+        Earlier versions of the workflow attempted a ``cat`` fallback against
+        the dump directory.  That was removed in favour of fail-fast
+        behaviour (the indexfile is now written into a rw-mounted work-dir
+        path, so the only reason for an empty result is a genuine imp
+        failure that the caller needs to see).
+        """
         discovery_dir = tmp_path / "discovery"
         discovery_dir.mkdir(parents=True)
-        fallback_sql = 'REM CREATE TABLE "S"."FALLBACK" (\n'
-
-        fallback_result = MagicMock()
-        fallback_result.returncode = 0
-        fallback_result.stdout = fallback_sql
 
         container = MagicMock()
-        container.exec.return_value = fallback_result
-
         discovery_runner = MagicMock()
         discovery_runner.container = container
         discovery_runner.run_imp_indexfile.return_value = ("", "Import complete")
@@ -103,8 +104,12 @@ class TestDiscoverTables:
             inspect_runner=MagicMock(),
             convert_runner=MagicMock(),
         )
-        tables = wf.discover_tables()
-        assert ("S", "FALLBACK") in tables
+        with pytest.raises(DataPumpError, match="produced no SQL output"):
+            wf.discover_tables()
+        # The container fallback must no longer be invoked.
+        container.exec.assert_not_called()
+        # The log is still persisted so operators can diagnose the failure.
+        assert (discovery_dir / "discovery-imp-indexfile.log").read_text() == "Import complete"
 
 
 class TestRequiredTablespaces:

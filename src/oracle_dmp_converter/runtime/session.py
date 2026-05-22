@@ -38,8 +38,17 @@ def write_session(
     oracle_image: str,
     work_dir: Path,
     dump_dir: Path,
+    metadata_imported: bool = False,
+    prepared_schemas: frozenset[str] | None = None,
 ) -> None:
-    """Serialise *container*'s identity to *path* as JSON."""
+    """Serialise *container*'s identity to *path* as JSON.
+
+    When *metadata_imported* is ``True`` the current UTC time is stamped into
+    ``metadata_import_time`` so a later ``convert`` invocation can tell how
+    fresh the imported staging state is.  *prepared_schemas* is normalised to
+    a frozen set (defaulting to empty) so consumers always see a stable type.
+    """
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     session = ContainerSession(
         container_name=container.name,
         container_runtime=container_runtime,
@@ -47,7 +56,10 @@ def write_session(
         oracle_service=container.service,
         work_dir=str(work_dir.resolve()),
         dump_dir=str(dump_dir),
-        created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        created_at=now,
+        metadata_imported=metadata_imported,
+        metadata_import_time=now if metadata_imported else "",
+        prepared_schemas=prepared_schemas or frozenset(),
     )
     save_session(path, session)
 
