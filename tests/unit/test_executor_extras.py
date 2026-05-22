@@ -369,9 +369,7 @@ class TestImportTableChunkTablespaceRecovery:
             patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
         ):
             with pytest.raises(DataPumpError, match="IMP-00009"):
-                executor.import_table_chunk(
-                    source_schema="SRC", table="ORDERS", chunk_name="whole"
-                )
+                executor.import_table_chunk(source_schema="SRC", table="ORDERS", chunk_name="whole")
 
     def test_reraises_on_second_failure(self) -> None:
         executor = _make_executor()
@@ -388,6 +386,4 @@ class TestImportTableChunkTablespaceRecovery:
             patch("oracle_dmp_converter.core.executor.grant_quota_unlimited"),
         ):
             with pytest.raises(DataPumpError):
-                executor.import_table_chunk(
-                    source_schema="SRC", table="ORDERS", chunk_name="whole"
-                )
+                executor.import_table_chunk(source_schema="SRC", table="ORDERS", chunk_name="whole")

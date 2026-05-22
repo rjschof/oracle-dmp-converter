@@ -56,6 +56,7 @@ from oracle_dmp_converter.oracle.conn import (
     ensure_tablespace,
     grant_quota_unlimited,
     oracle_connection,
+    table_exists,
     truncate_table,
 )
 from oracle_dmp_converter.oracle.exporter import export_table
@@ -261,6 +262,35 @@ class StagingExecutor:
         LOGGER.info("Dropping staging schema %s", stage_schema)
         with self._connect() as conn:
             drop_schema(conn, stage_schema)
+
+    def validate_staging_tables(self, table_plans: list[TablePlan]) -> None:
+        """Validate that staging tables imported during inspect still exist.
+
+        Should be called before convert when the workflow was already
+        initialised from a prior :meth:`inspect_dump` call.  Raises
+        :exc:`ValueError` with a helpful message if any staging table is
+        missing so the caller knows to re-run inspect rather than seeing a
+        cryptic Oracle error mid-conversion.
+
+        Args:
+            table_plans: Supported (non-UNSUPPORTED) table plans whose
+                staging tables should be present.
+
+        Raises:
+            ValueError: If one or more staging tables are absent.
+        """
+        missing: list[str] = []
+        with self._connect() as conn:
+            for tp in table_plans:
+                stage_schema = self._stage_schema_for(tp.schema)
+                if not table_exists(conn, stage_schema, tp.table):
+                    missing.append(f"{stage_schema}.{tp.table}")
+        if missing:
+            raise ValueError(
+                "Staging tables from the inspect phase are missing: "
+                + ", ".join(missing)
+                + ". Re-run inspect before convert."
+            )
 
     def _apply_staging_fixups(self, source_schema: str) -> None:
         """Run all post-import staging fixups in a single connection."""
@@ -666,6 +696,7 @@ class StagingExecutor:
         output_dir: Path,
         state_store: StateStore | None = None,
     ) -> PlanConversionResult:
+        workflow_from_inspect = self._workflow is not None
         if self._workflow is None:
             self.use_format(plan.dump_format)
 
@@ -680,6 +711,9 @@ class StagingExecutor:
                 )
             else:
                 supported.append(table_plan)
+
+        if workflow_from_inspect:
+            self.validate_staging_tables(supported)
 
         plan_started_at = datetime.now(UTC)
         results: list[TableConversionResult] = []

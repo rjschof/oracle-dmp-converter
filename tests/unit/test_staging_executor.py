@@ -496,3 +496,115 @@ def test_convert_table_batch_whole_table_chunk_passes_none_partition_name(
         converter.convert_table_batch([plan], tmp_path)
 
     assert captured_partition_names == [None]
+
+
+# ---------------------------------------------------------------------------
+# validate_staging_tables / convert_plan metadata reuse
+# ---------------------------------------------------------------------------
+
+
+def test_convert_calls_validate_staging_tables(tmp_path: Path) -> None:
+    """When a workflow already exists (from inspect), convert_plan calls validate_staging_tables."""
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.DATAPUMP
+    converter._workflow = mock_workflow  # Already set — simulates prior inspect call
+
+    plan = ConversionPlan(
+        dump_paths=("test.dmp",),
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        tables=(_whole_table_plan("SRC", "ORDERS"),),
+    )
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch(
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
+            return_value=_fake_metadata("DMP_SRC", "ORDERS"),
+        ),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=5),
+        patch(
+            "oracle_dmp_converter.core.executor.export_table",
+            return_value=_fake_export(tmp_path, "src", "orders"),
+        ),
+        patch.object(converter, "validate_staging_tables") as mock_validate,
+    ):
+        converter.convert_plan(plan, tmp_path)
+
+    mock_validate.assert_called_once()
+    called_plans = mock_validate.call_args[0][0]
+    assert len(called_plans) == 1
+    assert called_plans[0].table == "ORDERS"
+
+
+def test_convert_does_not_validate_when_no_prior_inspect(tmp_path: Path) -> None:
+    """When no workflow exists yet (no prior inspect), convert_plan skips validation."""
+    converter = _make_converter(ConverterConfig())
+    # _workflow is None — simulate standalone convert (no prior inspect)
+    assert converter._workflow is None  # type: ignore[attr-defined]
+
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.DATAPUMP
+
+    plan = ConversionPlan(
+        dump_paths=("test.dmp",),
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        tables=(_whole_table_plan("SRC", "ORDERS"),),
+    )
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch(
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
+            return_value=_fake_metadata("DMP_SRC", "ORDERS"),
+        ),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=5),
+        patch(
+            "oracle_dmp_converter.core.executor.export_table",
+            return_value=_fake_export(tmp_path, "src", "orders"),
+        ),
+        patch.object(
+            StagingExecutor,
+            "use_format",
+            lambda self, fmt: setattr(self, "_workflow", mock_workflow),
+        ),
+        patch.object(converter, "validate_staging_tables") as mock_validate,
+    ):
+        converter.convert_plan(plan, tmp_path)
+
+    mock_validate.assert_not_called()
+
+
+def test_validate_staging_tables_raises_when_table_missing(tmp_path: Path) -> None:
+    """validate_staging_tables raises ValueError listing missing staging tables."""
+    converter = _make_converter(ConverterConfig())
+    plan = _whole_table_plan("SRC", "ORDERS")
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.table_exists", return_value=False),
+        pytest.raises(ValueError, match="DMP_SRC.ORDERS"),
+    ):
+        converter.validate_staging_tables([plan])
+
+
+def test_validate_staging_tables_passes_when_all_present(tmp_path: Path) -> None:
+    """validate_staging_tables succeeds when all staging tables exist."""
+    converter = _make_converter(ConverterConfig())
+    plan = _whole_table_plan("SRC", "ORDERS")
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.table_exists", return_value=True),
+    ):
+        converter.validate_staging_tables([plan])  # must not raise
