@@ -12,3 +12,4 @@ sample-data/
 tests/runs/
 *.dmp
 *.log
+.coverage

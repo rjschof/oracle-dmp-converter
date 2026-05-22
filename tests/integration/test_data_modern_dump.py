@@ -11,16 +11,19 @@ Partitioned tables: PRODUCTS (LIST), TRANSACTIONS (RANGE), CHANGE_LOG (HASH).
 
 Each test exercises one CLI subcommand in isolation:
 
+  * test_doctor                  — ``doctor`` only
   * test_modern_inspect          — ``inspect`` only
   * test_modern_plan             — ``inspect`` (prerequisite) then ``plan``
   * test_modern_convert          — ``inspect`` + ``plan`` (prerequisites) then ``convert``
   * test_modern_convert_oneshot  — ``convert`` in one-shot mode (no prior ``--plan``)
+  * test_modern_convert_avro     — one-shot ``convert`` with ``--format avro``
+  * test_modern_convert_csv      — one-shot ``convert`` with ``--format csv``
 """
 
 from __future__ import annotations
 
+import json
 import os
-import uuid
 from pathlib import Path
 
 import pytest
@@ -28,22 +31,14 @@ from click.testing import CliRunner
 
 from oracle_dmp_converter.cli import main
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
-from oracle_dmp_converter.models import DumpFormat, TableStrategy
+from oracle_dmp_converter.models import DumpFormat, OutputFormat, TableStrategy
 from oracle_dmp_converter.persistence.serialization import load_manifest, load_plan
-from oracle_dmp_converter.persistence.validation import count_parquet_rows
+from oracle_dmp_converter.persistence.validation import count_output_rows
 
 pytestmark = pytest.mark.integration
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-_RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
 _MODERN_DUMP = _DATA_DIR / "modern.dmp"
-
-
-def _run_dir(name: str) -> Path:
-    """Return a unique, empty directory under tests/runs/ for a test run."""
-    path = _RUNS_DIR / f"{name}_{uuid.uuid4().hex[:8]}"
-    path.mkdir(parents=True)
-    return path
 
 
 _EXPECTED_ROWS: dict[str, dict[str, int]] = {
@@ -103,16 +98,32 @@ def _invoke_plan(runner: CliRunner, manifest_path: Path, plan_path: Path) -> Non
     assert plan_path.exists(), "plan.yaml was not created by plan"
 
 
-def _assert_parquet_output(output_dir: Path) -> None:
-    """Assert all expected tables have Parquet output with correct row counts."""
+def _assert_output(output_dir: Path, output_format: OutputFormat, ext: str) -> None:
+    """Assert all expected tables have output files with correct row counts."""
     for schema_name, schema_tables in _EXPECTED_ROWS.items():
         for table_name, expected_rows in schema_tables.items():
-            files = sorted((output_dir / schema_name / table_name).glob("*.parquet"))
-            assert files, f"No parquet files found for {schema_name}.{table_name}"
-            actual_rows = count_parquet_rows(files)
+            files = sorted((output_dir / schema_name / table_name).glob(f"*.{ext}"))
+            assert files, f"No {ext} files found for {schema_name}.{table_name}"
+            actual_rows = count_output_rows(files, output_format)
             assert actual_rows == expected_rows, (
                 f"{schema_name}.{table_name}: expected {expected_rows} rows, got {actual_rows}"
             )
+
+
+def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
+    """Assert conversion_report.yaml and conversion_report.json exist with correct totals."""
+    yaml_report = work_dir / "conversion_report.yaml"
+    json_report = work_dir / "conversion_report.json"
+    assert yaml_report.exists(), "conversion_report.yaml was not written"
+    assert json_report.exists(), "conversion_report.json was not written"
+    report = json.loads(json_report.read_text())
+    stats = report["statistics"]
+    assert stats["total_output_rows"] == expected_total_rows, (
+        f"Report total_output_rows: expected {expected_total_rows}, "
+        f"got {stats['total_output_rows']}"
+    )
+    assert stats["tables_converted"] > 0, "Report shows no converted tables"
+    assert stats["tables_skipped"] == 0, f"Unexpected skipped tables: {stats['tables_skipped']}"
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +131,15 @@ def _assert_parquet_output(output_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_modern_inspect() -> None:
-    """inspect subcommand: writes manifest.json with DATAPUMP format and all expected tables."""
+def test_doctor() -> None:
+    """doctor subcommand: reports the container runtime as available."""
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, f"doctor failed:\n{result.output}"
 
-    base = _run_dir("modern_inspect")
-    work_dir = base / "work"
+
+def test_modern_inspect(tmp_path: Path) -> None:
+    """inspect subcommand: writes manifest.json with DATAPUMP format and all expected tables."""
+    work_dir = tmp_path / "work"
     manifest_path = work_dir / "manifest.json"
     _invoke_inspect(CliRunner(), work_dir, manifest_path)
 
@@ -140,11 +155,9 @@ def test_modern_inspect() -> None:
             )
 
 
-def test_modern_plan() -> None:
+def test_modern_plan(tmp_path: Path) -> None:
     """plan subcommand: writes plan.yaml assigning PARTITION strategy to partitioned tables."""
-
-    base = _run_dir("modern_plan")
-    work_dir = base / "work"
+    work_dir = tmp_path / "work"
     manifest_path = work_dir / "manifest.json"
     plan_path = work_dir / "plan.yaml"
     runner = CliRunner()
@@ -164,14 +177,12 @@ def test_modern_plan() -> None:
         )
 
 
-def test_modern_convert() -> None:
-    """convert subcommand: produces correct Parquet output for all tables."""
-
-    base = _run_dir("modern_convert")
-    work_dir = base / "work"
+def test_modern_convert(tmp_path: Path) -> None:
+    """convert subcommand: produces correct Parquet output and conversion report."""
+    work_dir = tmp_path / "work"
     manifest_path = work_dir / "manifest.json"
     plan_path = work_dir / "plan.yaml"
-    output_dir = base / "parquet"
+    output_dir = tmp_path / "parquet"
     runner = CliRunner()
 
     _invoke_inspect(runner, work_dir, manifest_path)
@@ -197,15 +208,14 @@ def test_modern_convert() -> None:
     )
     assert convert_result.exit_code == 0, f"convert failed:\n{convert_result.output}"
 
-    _assert_parquet_output(output_dir)
+    _assert_output(output_dir, OutputFormat.PARQUET, "parquet")
+    _assert_conversion_report(work_dir, _TOTAL_ROWS)
 
 
-def test_modern_convert_oneshot() -> None:
+def test_modern_convert_oneshot(tmp_path: Path) -> None:
     """convert without --plan: inspects, plans, and converts in a single invocation."""
-
-    base = _run_dir("modern_convert_oneshot")
-    work_dir = base / "work"
-    output_dir = base / "parquet"
+    work_dir = tmp_path / "work"
+    output_dir = tmp_path / "parquet"
 
     result = CliRunner().invoke(
         main,
@@ -229,4 +239,63 @@ def test_modern_convert_oneshot() -> None:
     assert (work_dir / "manifest.json").exists(), "one-shot convert did not write manifest.json"
     assert (work_dir / "plan.yaml").exists(), "one-shot convert did not write plan.yaml"
 
-    _assert_parquet_output(output_dir)
+    _assert_output(output_dir, OutputFormat.PARQUET, "parquet")
+    _assert_conversion_report(work_dir, _TOTAL_ROWS)
+
+
+def test_modern_convert_avro(tmp_path: Path) -> None:
+    """convert with --format avro: produces correct Avro output for all tables."""
+    work_dir = tmp_path / "work"
+    output_dir = tmp_path / "avro"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "convert",
+            "--dump",
+            str(_MODERN_DUMP),
+            "--output",
+            str(output_dir),
+            "--work-dir",
+            str(work_dir),
+            "--oracle-image",
+            _image(),
+            "--oracle-password",
+            _PASSWORD,
+            "--format",
+            "avro",
+        ],
+    )
+    assert result.exit_code == 0, f"convert (avro) failed:\n{result.output}"
+
+    _assert_output(output_dir, OutputFormat.AVRO, "avro")
+    _assert_conversion_report(work_dir, _TOTAL_ROWS)
+
+
+def test_modern_convert_csv(tmp_path: Path) -> None:
+    """convert with --format csv: produces correct CSV output for all tables."""
+    work_dir = tmp_path / "work"
+    output_dir = tmp_path / "csv"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "convert",
+            "--dump",
+            str(_MODERN_DUMP),
+            "--output",
+            str(output_dir),
+            "--work-dir",
+            str(work_dir),
+            "--oracle-image",
+            _image(),
+            "--oracle-password",
+            _PASSWORD,
+            "--format",
+            "csv",
+        ],
+    )
+    assert result.exit_code == 0, f"convert (csv) failed:\n{result.output}"
+
+    _assert_output(output_dir, OutputFormat.CSV, "csv")
+    _assert_conversion_report(work_dir, _TOTAL_ROWS)

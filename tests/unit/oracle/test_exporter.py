@@ -15,6 +15,7 @@ from oracle_dmp_converter.config import ColumnOverride
 from oracle_dmp_converter.models import ColumnMetadata, OutputFormat
 from oracle_dmp_converter.oracle.exporter import (
     _coerce_value,
+    _read_lob,
     _rows_to_table,
     arrow_schema_for_columns,
     arrow_type_for_column,
@@ -68,6 +69,15 @@ class TestArrowTypeForColumn:
     def test_override_takes_precedence(self) -> None:
         override = ColumnOverride(parquet_type="string")
         assert arrow_type_for_column(_col("NUMBER", 10, 0), override) == pa.string()
+
+    def test_unknown_token_falls_back_to_string(self) -> None:
+        """arrow_type_for_column returns pa.string() for any unrecognised token."""
+        with patch(
+            "oracle_dmp_converter.oracle.exporter.oracle_to_arrow_token",
+            return_value="xyz_unsupported",
+        ):
+            result = arrow_type_for_column(_col("GEOMETRY"))
+        assert result == pa.string()
 
 
 # ---------------------------------------------------------------------------
@@ -226,3 +236,73 @@ def test_export_table_sql_with_partition(tmp_path: Path) -> None:
     # Verify the PARTITION clause appears after the table reference
     from_idx = sql_upper.index("FROM")
     assert sql_upper.index("PARTITION") > from_idx
+
+
+# ---------------------------------------------------------------------------
+# _read_lob
+# ---------------------------------------------------------------------------
+
+
+def test_read_lob_materialises_lob_object() -> None:
+    """_read_lob calls .read() on LOB-like objects."""
+    lob = MagicMock()
+    lob.read.return_value = "clob content"
+    assert _read_lob(lob) == "clob content"
+    lob.read.assert_called_once()
+
+
+def test_read_lob_passes_through_plain_values() -> None:
+    """Non-LOB values are returned unchanged."""
+    assert _read_lob("plain string") == "plain string"
+    assert _read_lob(42) == 42
+    assert _read_lob(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _coerce_value — remaining uncovered branches
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_bytes_passthrough_for_binary_type() -> None:
+    """bytes values are returned as bytes for binary columns (not str → encode)."""
+    assert _coerce_value(b"raw data", pa.binary()) == b"raw data"
+
+
+def test_coerce_passthrough_for_non_datetime_timestamp() -> None:
+    """Integer in timestamp column: neither datetime nor date, falls through."""
+    result = _coerce_value(1_000_000, pa.timestamp("us"))
+    assert result == 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# export_table — non-empty result path (lines 229-232)
+# ---------------------------------------------------------------------------
+
+
+def test_export_table_calls_write_batch_for_rows(tmp_path: Path) -> None:
+    """export_table should call write_batch (not write_empty) when rows exist."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchmany.side_effect = [[(1,), (2,)], []]
+
+    @contextmanager
+    def _cursor_ctx():
+        yield mock_cursor
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = _cursor_ctx
+    mock_cursor.execute.side_effect = lambda sql: None
+
+    mock_writer = MagicMock()
+    with patch("oracle_dmp_converter.oracle.exporter.make_writer", return_value=mock_writer):
+        result = export_table(
+            mock_conn,
+            schema_name="DMP_FINANCE",
+            table_name="TRANSACTIONS",
+            columns=_simple_columns(),
+            output_path=tmp_path / "out.parquet",
+            output_format=OutputFormat.PARQUET,
+        )
+
+    mock_writer.write_batch.assert_called_once()
+    mock_writer.write_empty.assert_not_called()
+    assert result.rows == 2

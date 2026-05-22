@@ -1,3 +1,4 @@
+from oracle_dmp_converter.config import ColumnOverride
 from oracle_dmp_converter.models import ColumnMetadata
 from oracle_dmp_converter.oracle.types import export_expression, oracle_to_arrow_token
 
@@ -28,3 +29,34 @@ def test_xmltype_is_stringified() -> None:
     column = col("XMLTYPE")
     assert oracle_to_arrow_token(column) == "string"
     assert export_expression(column) == "TO_CHAR(C1)"
+
+
+def test_float_type_maps_to_double() -> None:
+    assert oracle_to_arrow_token(col("FLOAT", 126)) == "double"
+
+
+def test_string_type_maps_to_string() -> None:
+    assert oracle_to_arrow_token(col("VARCHAR2")) == "string"
+
+
+def test_binary_type_maps_to_binary() -> None:
+    assert oracle_to_arrow_token(col("RAW")) == "binary"
+
+
+def test_timestamp_maps_to_timestamp_us() -> None:
+    assert oracle_to_arrow_token(col("TIMESTAMP")) == "timestamp_us"
+
+
+def test_unknown_type_defaults_to_string() -> None:
+    assert oracle_to_arrow_token(col("CUSTOM_TYPE")) == "string"
+
+
+def test_export_expression_with_override() -> None:
+    override = ColumnOverride(expression="MY_FUNC({column})")
+    result = export_expression(col("NUMBER"), override)
+    assert result == "MY_FUNC(C1)"
+
+
+def test_export_expression_plain_column() -> None:
+    result = export_expression(col("VARCHAR2"))
+    assert result == "C1"

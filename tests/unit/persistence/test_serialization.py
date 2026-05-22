@@ -10,6 +10,7 @@ from oracle_dmp_converter.models import (
     ConversionPlan,
     DumpFormat,
     DumpManifest,
+    PartitionMetadata,
     TableMetadata,
     TablePlan,
     TableStrategy,
@@ -254,3 +255,31 @@ def test_session_missing_optional_fields(tmp_path: Path) -> None:
     assert loaded.dump_dir == ""
     assert loaded.created_at == ""
     assert loaded.container_name == "oracle-dmp-converter-mintest"
+
+
+def test_manifest_round_trip_with_partitions(tmp_path: Path) -> None:
+    """Manifests that include PartitionMetadata round-trip correctly."""
+    manifest = DumpManifest(
+        dump_paths=("/tmp/part.dmp",),
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        container_runtime="docker",
+        tables=(
+            TableMetadata(
+                schema="SRC",
+                name="FACT",
+                columns=(ColumnMetadata("ID", "NUMBER", 1, False, 10, 0),),
+                estimated_bytes=2048,
+                row_count=100,
+                partitions=(
+                    PartitionMetadata(name="P_2024_01", position=1),
+                    PartitionMetadata(name="P_2024_02", position=2),
+                ),
+            ),
+        ),
+    )
+    path = tmp_path / "manifest_parts.json"
+    save_manifest(path, manifest)
+    loaded = load_manifest(path)
+    assert loaded == manifest
+    assert loaded.tables[0].partitions[0].name == "P_2024_01"
+    assert loaded.tables[0].partitions[1].position == 2
