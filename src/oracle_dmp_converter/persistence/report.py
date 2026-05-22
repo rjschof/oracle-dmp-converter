@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from oracle_dmp_converter.converter import PlanConversionResult
+from oracle_dmp_converter.core.results import PlanConversionResult
 from oracle_dmp_converter.models import (
     ChunkReport,
     ConversionPlan,
@@ -35,9 +35,7 @@ def build_conversion_report(
     Returns:
         A fully populated :class:`~oracle_dmp_converter.models.ConversionReport`.
     """
-    result_by_name = {
-        f"{r.source_schema}.{r.table}": r for r in result.tables
-    }
+    result_by_name = {f"{r.source_schema}.{r.table}": r for r in result.tables}
 
     successful: list[ChunkReport] = []
     skipped: list[SkippedTableReport] = []

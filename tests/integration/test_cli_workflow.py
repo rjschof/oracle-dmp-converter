@@ -10,21 +10,21 @@ from click.testing import CliRunner
 
 from oracle_dmp_converter.cli import main
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
-from oracle_dmp_converter.converter import OracleAdminConnection
 from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyExportJob,
     render_legacy_export_parfile,
 )
 from oracle_dmp_converter.datapump.modern.parfile import ExportJob
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
-from oracle_dmp_converter.docker_oracle import DockerOracle
-from oracle_dmp_converter.io.validation import count_parquet_rows
 from oracle_dmp_converter.oracle.conn import (
     OracleCredentials,
     create_directory,
     drop_schema,
     oracle_connection,
 )
+from oracle_dmp_converter.persistence.validation import count_parquet_rows
+from oracle_dmp_converter.runtime.admin import OracleAdminConnection
+from oracle_dmp_converter.runtime.container_oracle import ContainerOracle
 
 pytestmark = pytest.mark.integration
 
@@ -60,7 +60,7 @@ def _setup_cli_source(admin: OracleAdminConnection) -> None:
 
 def _export_cli_dump(tmp_path: Path, image: str, password: str) -> Path:
     dumpfile = "cli_full.dmp"
-    with DockerOracle.start(
+    with ContainerOracle.start(
         image=image,
         password=password,
         mounts=((tmp_path, "/dumps", "rw"),),
@@ -108,7 +108,7 @@ def _export_cli_legacy_dump(tmp_path: Path, image: str, password: str) -> Path:
     dump_dir.mkdir(exist_ok=True)
     dumpfile = "cli_legacy.dmp"
 
-    with DockerOracle.start(
+    with ContainerOracle.start(
         image=image,
         password=password,
         mounts=((dump_dir, "/dumps", "rw"),),
@@ -175,8 +175,6 @@ def test_cli_inspect_plan_convert_workflow(tmp_path: Path) -> None:
             str(dump_path),
             "--work-dir",
             str(tmp_path / "work"),
-            "--output",
-            str(manifest_path),
             "--oracle-image",
             image,
             "--oracle-password",
@@ -192,8 +190,6 @@ def test_cli_inspect_plan_convert_workflow(tmp_path: Path) -> None:
             "plan",
             "--manifest",
             str(manifest_path),
-            "--output",
-            str(plan_path),
         ],
     )
     assert plan_result.exit_code == 0, plan_result.output
@@ -243,8 +239,6 @@ def test_cli_legacy_inspect_plan_convert_workflow(tmp_path: Path) -> None:
             str(dump_path),
             "--work-dir",
             str(tmp_path / "work"),
-            "--output",
-            str(manifest_path),
             "--oracle-image",
             image,
             "--oracle-password",
@@ -260,8 +254,6 @@ def test_cli_legacy_inspect_plan_convert_workflow(tmp_path: Path) -> None:
             "plan",
             "--manifest",
             str(manifest_path),
-            "--output",
-            str(plan_path),
         ],
     )
     assert plan_result.exit_code == 0, plan_result.output

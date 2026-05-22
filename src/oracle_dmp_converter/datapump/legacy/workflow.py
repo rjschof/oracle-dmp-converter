@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from oracle_dmp_converter.datapump._workflow_base import DumpWorkflow
 from oracle_dmp_converter.datapump.legacy.imp_show import (
     parse_imp_indexfile_tables,
     parse_imp_indexfile_tablespaces,
@@ -14,7 +15,6 @@ from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyIndexFileJob,
 )
 from oracle_dmp_converter.datapump.legacy.runner import LegacyRunner
-from oracle_dmp_converter.datapump.workflow import DumpWorkflow
 from oracle_dmp_converter.models import DumpFormat
 from oracle_dmp_converter.oracle.conn import OracleCredentials
 

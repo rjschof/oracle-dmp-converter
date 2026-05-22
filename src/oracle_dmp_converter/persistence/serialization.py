@@ -299,7 +299,7 @@ def save_session(path: Path, session: ContainerSession) -> None:
 
     Creates parent directories as needed.  The Oracle password is deliberately
     excluded; it is recovered from the running container's environment when
-    reconnecting via :meth:`~oracle_dmp_converter.docker_oracle.DockerOracle.reconnect`.
+    reconnecting via :meth:`ContainerOracle.reconnect`.
 
     Args:
         path: Destination file path (conventionally ``session.json``).

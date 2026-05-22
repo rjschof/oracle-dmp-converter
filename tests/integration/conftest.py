@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from oracle_dmp_converter.docker_oracle import docker_available
+from oracle_dmp_converter.runtime.container_oracle import docker_available
 
 
 @pytest.fixture(autouse=True)

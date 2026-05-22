@@ -28,9 +28,9 @@ from click.testing import CliRunner
 
 from oracle_dmp_converter.cli import main
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
-from oracle_dmp_converter.io.serialization import load_manifest, load_plan
-from oracle_dmp_converter.io.validation import count_parquet_rows
 from oracle_dmp_converter.models import DumpFormat, TableStrategy
+from oracle_dmp_converter.persistence.serialization import load_manifest, load_plan
+from oracle_dmp_converter.persistence.validation import count_parquet_rows
 
 pytestmark = pytest.mark.integration
 
@@ -79,8 +79,6 @@ def _invoke_inspect(runner: CliRunner, work_dir: Path, manifest_path: Path) -> N
             str(_MODERN_DUMP),
             "--work-dir",
             str(work_dir),
-            "--output",
-            str(manifest_path),
             "--oracle-image",
             _image(),
             "--oracle-password",
@@ -99,8 +97,6 @@ def _invoke_plan(runner: CliRunner, manifest_path: Path, plan_path: Path) -> Non
             "plan",
             "--manifest",
             str(manifest_path),
-            "--output",
-            str(plan_path),
         ],
     )
     assert result.exit_code == 0, f"plan failed:\n{result.output}"

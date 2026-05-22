@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from oracle_dmp_converter.datapump._workflow_base import DumpWorkflow
 from oracle_dmp_converter.datapump.modern.parfile import (
     BatchImportJob,
     BulkMetadataImportJob,
@@ -13,7 +14,6 @@ from oracle_dmp_converter.datapump.modern.parfile import (
 )
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
 from oracle_dmp_converter.datapump.modern.sqlfile import parse_sqlfile_tables
-from oracle_dmp_converter.datapump.workflow import DumpWorkflow
 from oracle_dmp_converter.models import DumpFormat
 from oracle_dmp_converter.oracle.conn import OracleCredentials
 
@@ -180,7 +180,9 @@ class DataPumpWorkflow(DumpWorkflow):
             connection=self._credentials,
             directory=self._directory,
             dumpfiles=self._dumpfiles,
-            logfile=f"{self._convert_directory}:impdp-{source_schema}-{table}-{chunk_name}.log"[:200],
+            logfile=f"{self._convert_directory}:impdp-{source_schema}-{table}-{chunk_name}.log"[
+                :200
+            ],
             source_schema=source_schema,
             table=table,
             remap_schema=(source_schema, stage_schema),

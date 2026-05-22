@@ -174,8 +174,7 @@ def render_import_parfile(job: ImportJob) -> str:
 
 def render_batch_import_parfile(job: BatchImportJob) -> str:
     tables_value = ", ".join(
-        _table_spec(schema, table, partition)
-        for schema, table, partition in job.table_specs
+        _table_spec(schema, table, partition) for schema, table, partition in job.table_specs
     )
     lines = [
         f"USERID={job.connection.userid}",

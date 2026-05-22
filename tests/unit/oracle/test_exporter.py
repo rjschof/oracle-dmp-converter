@@ -12,7 +12,7 @@ import pyarrow as pa
 import pytest
 
 from oracle_dmp_converter.config import ColumnOverride
-from oracle_dmp_converter.models import ColumnMetadata
+from oracle_dmp_converter.models import ColumnMetadata, OutputFormat
 from oracle_dmp_converter.oracle.exporter import (
     _coerce_value,
     _rows_to_table,
@@ -20,7 +20,6 @@ from oracle_dmp_converter.oracle.exporter import (
     arrow_type_for_column,
     export_table,
 )
-from oracle_dmp_converter.models import OutputFormat
 
 
 def _col(

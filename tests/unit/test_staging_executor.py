@@ -1,4 +1,5 @@
-"""Unit tests for OracleDumpConverter internals."""
+"""Unit tests for StagingExecutor internals."""
+# pylint: disable=protected-access,unused-argument,unused-variable,missing-function-docstring
 
 from __future__ import annotations
 
@@ -8,8 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from oracle_dmp_converter.config import ColumnOverride, ConverterConfig
-from oracle_dmp_converter.converter import OracleAdminConnection, OracleDumpConverter
-from oracle_dmp_converter.io.state import ChunkState, StateStore
+from oracle_dmp_converter.core.executor import StagingExecutor
 from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
@@ -19,10 +19,12 @@ from oracle_dmp_converter.models import (
     TablePlan,
     TableStrategy,
 )
+from oracle_dmp_converter.persistence.state import ChunkState, StateStore
+from oracle_dmp_converter.runtime.admin import OracleAdminConnection
 
 
-def _make_converter(config: ConverterConfig) -> OracleDumpConverter:
-    return OracleDumpConverter(
+def _make_converter(config: ConverterConfig) -> StagingExecutor:
+    return StagingExecutor(
         container=MagicMock(),
         admin=OracleAdminConnection("localhost", 1521, "FREE", "system", "pwd"),
         work_dir=Path("/tmp/work"),
@@ -92,14 +94,14 @@ def test_export_stage_table_passes_column_overrides(tmp_path: Path) -> None:
     fake_export.path = tmp_path / "app" / "orders" / "whole.parquet"
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             return_value=fake_metadata,
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=0),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
         patch(
-            "oracle_dmp_converter.converter.export_table", return_value=fake_export
+            "oracle_dmp_converter.core.executor.export_table", return_value=fake_export
         ) as mock_export,
     ):
         converter.export_stage_table(
@@ -136,14 +138,14 @@ def test_export_stage_table_no_overrides_passes_none(tmp_path: Path) -> None:
     fake_export.path = tmp_path / "app" / "orders" / "whole.parquet"
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             return_value=fake_metadata,
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=0),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
         patch(
-            "oracle_dmp_converter.converter.export_table", return_value=fake_export
+            "oracle_dmp_converter.core.executor.export_table", return_value=fake_export
         ) as mock_export,
     ):
         converter.export_stage_table(
@@ -181,14 +183,14 @@ def test_convert_plan_skips_unsupported_tables(tmp_path: Path) -> None:
     fake_export = _fake_export(tmp_path, "src", "small", rows=5)
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             return_value=_fake_metadata("DMP_SRC", "SMALL"),
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=5),
-        patch("oracle_dmp_converter.converter.export_table", return_value=fake_export),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=5),
+        patch("oracle_dmp_converter.core.executor.export_table", return_value=fake_export),
     ):
         result = converter.convert_plan(plan, tmp_path)
 
@@ -214,15 +216,15 @@ def test_convert_table_batch_single_impdp_call(tmp_path: Path) -> None:
     _, mock_ctx = _mock_conn_ctx()
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             side_effect=lambda conn, schema, table: _fake_metadata(schema, table),
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=5),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=5),
         patch(
-            "oracle_dmp_converter.converter.export_table",
+            "oracle_dmp_converter.core.executor.export_table",
             side_effect=lambda conn, **kw: _fake_export(tmp_path, "src", kw["table_name"].lower()),
         ),
     ):
@@ -262,15 +264,15 @@ def test_convert_table_batch_skips_completed_chunks(tmp_path: Path) -> None:
     _, mock_ctx = _mock_conn_ctx()
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             side_effect=lambda conn, schema, table: _fake_metadata(schema, table),
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=4),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=4),
         patch(
-            "oracle_dmp_converter.converter.export_table",
+            "oracle_dmp_converter.core.executor.export_table",
             return_value=_fake_export(tmp_path, "src", "todo", rows=4),
         ),
     ):
@@ -303,18 +305,14 @@ def test_convert_table_batch_marks_all_failed_on_import_error(tmp_path: Path) ->
     _, mock_ctx = _mock_conn_ctx()
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
         pytest.raises(RuntimeError, match="impdp boom"),
     ):
         converter.convert_table_batch(plans, tmp_path, state_store)
 
     # Both pending chunks marked failed.
-    failed_calls = [
-        c
-        for c in state_store.upsert.call_args_list
-        if c.args[0].status == "failed"
-    ]
+    failed_calls = [c for c in state_store.upsert.call_args_list if c.args[0].status == "failed"]
     assert len(failed_calls) == 2
     failed_tables = {c.args[0].table_name for c in failed_calls}
     assert "SRC.A" in failed_tables
@@ -353,14 +351,14 @@ def test_export_stage_table_passes_partition_name_to_export_table(tmp_path: Path
     mock_conn, mock_ctx = _mock_conn_ctx()
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             return_value=fake_metadata,
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=20) as mock_count,
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=20) as mock_count,
         patch(
-            "oracle_dmp_converter.converter.export_table", return_value=fake_export
+            "oracle_dmp_converter.core.executor.export_table", return_value=fake_export
         ) as mock_export,
     ):
         result = converter.export_stage_table(
@@ -400,14 +398,14 @@ def test_export_stage_table_no_partition_name_omits_filter(tmp_path: Path) -> No
     _, mock_ctx = _mock_conn_ctx()
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
         patch(
-            "oracle_dmp_converter.converter.discover_table_metadata",
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
             return_value=fake_metadata,
         ),
-        patch("oracle_dmp_converter.converter.count_rows", return_value=10),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=10),
         patch(
-            "oracle_dmp_converter.converter.export_table", return_value=fake_export
+            "oracle_dmp_converter.core.executor.export_table", return_value=fake_export
         ) as mock_export,
     ):
         converter.export_stage_table(
@@ -450,8 +448,8 @@ def test_convert_table_batch_passes_partition_name_for_partition_chunks(tmp_path
         )
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
         patch.object(converter, "export_stage_table", side_effect=fake_export_stage),
     ):
         converter.convert_table_batch([plan], tmp_path)
@@ -491,8 +489,8 @@ def test_convert_table_batch_whole_table_chunk_passes_none_partition_name(
         )
 
     with (
-        patch("oracle_dmp_converter.converter.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.converter.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
         patch.object(converter, "export_stage_table", side_effect=fake_export_stage),
     ):
         converter.convert_table_batch([plan], tmp_path)

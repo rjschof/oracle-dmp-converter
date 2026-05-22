@@ -185,7 +185,7 @@ def _ensure_mount_path_permissions(host_path: Path, mode: str) -> Path:
 
 
 @dataclass
-class DockerOracle:
+class ContainerOracle:
     """Managed Oracle Database Free container.
 
     Wraps the Docker/Podman SDK to start, probe, and stop a
@@ -231,10 +231,10 @@ class DockerOracle:
         platform: str | None = None,
         mounts: tuple[tuple[Path, str, str], ...] = (),
         runtime: str | None = None,
-    ) -> DockerOracle:
+    ) -> ContainerOracle:
         """Create and start a new Oracle Free container.
 
-        Constructs a :class:`DockerOracle` instance and immediately starts the
+        Constructs a :class:`ContainerOracle` instance and immediately starts the
         container.  Callers should use this as a context manager to ensure the
         container is stopped on exit.
 
@@ -253,7 +253,7 @@ class DockerOracle:
                 ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
 
         Returns:
-            A :class:`DockerOracle` instance with :attr:`started` set to
+            A :class:`ContainerOracle` instance with :attr:`started` set to
             ``True``.
 
         Raises:
@@ -283,7 +283,7 @@ class DockerOracle:
         image: str = "",
         service: str = "FREEPDB1",
         runtime: str | None = None,
-    ) -> DockerOracle:
+    ) -> ContainerOracle:
         """Reconnect to an already-running Oracle container by name.
 
         Looks up the container in the Docker/Podman daemon, verifies it is
@@ -305,7 +305,7 @@ class DockerOracle:
                 ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
 
         Returns:
-            A :class:`DockerOracle` instance with :attr:`started` set to
+            A :class:`ContainerOracle` instance with :attr:`started` set to
             ``True`` and :attr:`password` populated from the container env.
 
         Raises:
@@ -598,11 +598,11 @@ class DockerOracle:
                 self._client.close()
                 self._client = None
 
-    def __enter__(self) -> DockerOracle:
+    def __enter__(self) -> ContainerOracle:
         """Support use as a context manager; returns ``self``.
 
         Returns:
-            This :class:`DockerOracle` instance.
+            This :class:`ContainerOracle` instance.
         """
         return self
 

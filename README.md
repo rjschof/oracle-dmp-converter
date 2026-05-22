@@ -44,27 +44,25 @@ Check runtime prerequisites:
 oracle-dmp-converter doctor
 ```
 
-Inspect a Data Pump dump:
+Inspect a Data Pump dump (writes `<work-dir>/manifest.json`):
 
 ```bash
 oracle-dmp-converter inspect \
   --dump ./input/full.dmp \
-  --work-dir ./work \
-  --output ./work/manifest.json
+  --work-dir ./work
 ```
 
 `--dump` can be repeated for multi-file dump sets; all files must share the same directory.
 
-Create a conversion plan:
+Create a conversion plan (writes `<manifest-dir>/plan.yaml`):
 
 ```bash
 oracle-dmp-converter plan \
   --manifest ./work/manifest.json \
-  --config ./config.yaml \
-  --output ./work/plan.yaml
+  --config ./config.yaml
 ```
 
-Convert all planned tables:
+Convert all planned tables (`--output` defaults to `<work-dir>/output`):
 
 ```bash
 oracle-dmp-converter convert \
@@ -109,6 +107,26 @@ All commands that start an Oracle container accept these options:
 | `--oracle-image IMAGE` | `gvenzl/oracle-free:23-faststart` | Docker image for the staging container |
 | `--oracle-password PW` | `OraclePwd_123` | Oracle `system` user password |
 | `--container-runtime RT` | `docker` | Container runtime (`docker` or `podman`) |
+
+## Using as a library
+
+The CLI is a thin wrapper around `OracleDMPConverter`. Drive it directly from any Python process:
+
+```python
+from pathlib import Path
+from oracle_dmp_converter import OracleDMPConverter, ConverterSettings
+
+settings = ConverterSettings(
+    dump_paths=(Path("dumps/export01.dmp"),),
+    oracle_password="OraclePwd_123",
+    work_dir=Path("work"),
+    output_dir=Path("work/output"),
+)
+with OracleDMPConverter(settings) as converter:
+    result = converter.run()   # inspect → plan → convert
+```
+
+Each phase is also available individually: `converter.inspect()`, `converter.plan(manifest)`, `converter.convert(plan)`. Every phase writes its canonical artifact under `settings.work_dir` (`manifest.json`, `plan.yaml`, `conversion_report.yaml`).
 
 ## Config
 

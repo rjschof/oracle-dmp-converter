@@ -1,13 +1,8 @@
+import json
 from pathlib import Path
 
-from oracle_dmp_converter.io.serialization import (
-    load_manifest,
-    load_plan,
-    load_session,
-    save_manifest,
-    save_plan,
-    save_session,
-)
+import yaml
+
 from oracle_dmp_converter.models import (
     ChunkPlan,
     ColumnMetadata,
@@ -18,6 +13,14 @@ from oracle_dmp_converter.models import (
     TableMetadata,
     TablePlan,
     TableStrategy,
+)
+from oracle_dmp_converter.persistence.serialization import (
+    load_manifest,
+    load_plan,
+    load_session,
+    save_manifest,
+    save_plan,
+    save_session,
 )
 
 
@@ -69,7 +72,6 @@ def test_manifest_round_trip_legacy_format(tmp_path: Path) -> None:
 
 def test_manifest_round_trip_missing_runtime_fields(tmp_path: Path) -> None:
     """Old manifest.json files without oracle_image/container_runtime load with empty defaults."""
-    import json
 
     payload = {
         "version": 1,
@@ -170,7 +172,6 @@ def test_plan_round_trip_legacy_format(tmp_path: Path) -> None:
 
 def test_plan_round_trip_missing_container_runtime(tmp_path: Path) -> None:
     """Old plan.yaml files without container_runtime load with 'docker' default."""
-    import yaml
 
     payload = {
         "version": 1,
@@ -238,7 +239,6 @@ def test_session_creates_parent_dirs(tmp_path: Path) -> None:
 
 def test_session_missing_optional_fields(tmp_path: Path) -> None:
     """session.json files with missing optional fields use safe defaults."""
-    import json
 
     payload = {
         "version": 1,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from oracle_dmp_converter.datapump._base_runner import _BaseRunner
 from oracle_dmp_converter.datapump.modern.parfile import (
@@ -18,7 +17,6 @@ from oracle_dmp_converter.datapump.modern.parfile import (
     render_import_parfile,
     render_sqlfile_parfile,
 )
-from oracle_dmp_converter.docker_oracle import DockerOracle
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,17 +34,6 @@ def is_legacy_format_error(output: str) -> bool:
 
 class DataPumpRunner(_BaseRunner):
     """Executes modern Data Pump (expdp/impdp) jobs inside a Docker container."""
-
-    def __init__(self, container: DockerOracle, work_dir: Path) -> None:
-        """Initialise the runner with a target container and local work directory.
-
-        Args:
-            container: Running :class:`~oracle_dmp_converter.docker_oracle.DockerOracle`
-                instance in which ``expdp`` / ``impdp`` commands will be executed.
-            work_dir: Local directory for temporary parfiles; passed directly
-                to :class:`~oracle_dmp_converter.datapump._base_runner._BaseRunner`.
-        """
-        super().__init__(container, work_dir)
 
     def run_expdp(self, job: ExportJob) -> str:
         """Run an ``expdp`` export job and return the combined output.

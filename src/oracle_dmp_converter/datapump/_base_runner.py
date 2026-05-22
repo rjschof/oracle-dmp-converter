@@ -14,8 +14,8 @@ import logging
 import uuid
 from pathlib import Path
 
-from oracle_dmp_converter.docker_oracle import DockerOracle
 from oracle_dmp_converter.errors import DataPumpError
+from oracle_dmp_converter.runtime.container_oracle import ContainerOracle
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,11 +23,11 @@ LOGGER = logging.getLogger(__name__)
 class _BaseRunner:
     """Internal base: parfile write/copy and Oracle tool execution."""
 
-    def __init__(self, container: DockerOracle, work_dir: Path) -> None:
+    def __init__(self, container: ContainerOracle, work_dir: Path) -> None:
         """Store the target container and ensure the local work directory exists.
 
         Args:
-            container: Running :class:`~oracle_dmp_converter.docker_oracle.DockerOracle`
+            container: Running :class:`ContainerOracle`
                 instance that will execute ``expdp``/``impdp``/``imp`` commands.
             work_dir: Local directory where generated parfiles are written
                 before being copied into the container.  Created automatically

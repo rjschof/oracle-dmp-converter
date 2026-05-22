@@ -1,5 +1,15 @@
-"""Oracle Data Pump to Parquet conversion helpers."""
+"""Convert Oracle Data Pump dumps to Parquet, Avro, or CSV."""
 
-__all__ = ["__version__"]
+from oracle_dmp_converter.converter import OracleDMPConverter
+from oracle_dmp_converter.models import DumpFormat, OutputFormat
+from oracle_dmp_converter.settings import ConverterSettings
 
 __version__ = "0.5.2"
+
+__all__ = [
+    "ConverterSettings",
+    "DumpFormat",
+    "OracleDMPConverter",
+    "OutputFormat",
+    "__version__",
+]

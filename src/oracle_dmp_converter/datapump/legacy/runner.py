@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from oracle_dmp_converter.datapump._base_runner import _BaseRunner
 from oracle_dmp_converter.datapump.legacy.parfile import (
@@ -12,24 +11,12 @@ from oracle_dmp_converter.datapump.legacy.parfile import (
     render_legacy_import_parfile,
     render_legacy_indexfile_parfile,
 )
-from oracle_dmp_converter.docker_oracle import DockerOracle
 
 LOGGER = logging.getLogger(__name__)
 
 
 class LegacyRunner(_BaseRunner):
     """Executes legacy Oracle imp/exp jobs inside a Docker container."""
-
-    def __init__(self, container: DockerOracle, work_dir: Path) -> None:
-        """Initialise the runner with a target container and local work directory.
-
-        Args:
-            container: Running :class:`~oracle_dmp_converter.docker_oracle.DockerOracle`
-                instance in which ``imp`` commands will be executed.
-            work_dir: Local directory for temporary parfiles; passed directly
-                to :class:`~oracle_dmp_converter.datapump._base_runner._BaseRunner`.
-        """
-        super().__init__(container, work_dir)
 
     def run_imp(self, job: LegacyImportJob) -> str:
         """Run a legacy ``imp`` import job.

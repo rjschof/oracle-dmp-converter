@@ -45,14 +45,12 @@ import oracledb
 import yaml
 
 from oracle_dmp_converter.config import DEFAULT_ORACLE_IMAGE
-from oracle_dmp_converter.converter import OracleAdminConnection
 from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyExportJob,
     render_legacy_export_parfile,
 )
 from oracle_dmp_converter.datapump.modern.parfile import ExportJob
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
-from oracle_dmp_converter.docker_oracle import DockerOracle, docker_available
 from oracle_dmp_converter.oracle.conn import (
     OracleCredentials,
     create_directory,
@@ -61,6 +59,8 @@ from oracle_dmp_converter.oracle.conn import (
     execute_ignore,
     oracle_connection,
 )
+from oracle_dmp_converter.runtime.admin import OracleAdminConnection
+from oracle_dmp_converter.runtime.container_oracle import ContainerOracle, docker_available
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1035,7 +1035,7 @@ def create_sample_database(admin: OracleAdminConnection) -> None:
 
 def export_modern_dump(
     *,
-    container: DockerOracle,
+    container: ContainerOracle,
     admin: OracleAdminConnection,
     output_dir: Path,
 ) -> None:
@@ -1075,7 +1075,7 @@ def export_modern_dump(
 
 def export_legacy_dump(
     *,
-    container: DockerOracle,
+    container: ContainerOracle,
     admin: OracleAdminConnection,
     output_dir: Path,
 ) -> None:
@@ -1283,7 +1283,7 @@ def main() -> None:
 
     prepare_output_dir(output_dir, args.force)
 
-    with DockerOracle.start(
+    with ContainerOracle.start(
         image=args.oracle_image,
         password=args.oracle_password,
         mounts=((output_dir, CONTAINER_DUMP_PATH, "rw"),),

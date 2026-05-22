@@ -4,7 +4,7 @@
 
 Python 3.12 CLI tool that converts Oracle Data Pump (`expdp`) and legacy (`exp`) dump files to Parquet, Avro, or CSV. It does **not** parse `.dmp` files directly — it spins up Oracle Database Free in Docker/Podman as a temporary staging reader, then exports via PyArrow/fastavro.
 
-Entry point: `src/oracle_dmp_converter/cli.py` — Click group with four subcommands: `doctor`, `inspect`, `plan`, `convert`.
+Library entry point: `src/oracle_dmp_converter/converter.py` — `OracleDMPConverter` facade with `start`/`stop`/`inspect`/`plan`/`convert`/`run`. CLI lives in `src/oracle_dmp_converter/cli/` and is a thin Click adapter — Click group with four subcommands: `doctor`, `inspect`, `plan`, `convert`.
 
 ---
 

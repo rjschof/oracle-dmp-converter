@@ -1,4 +1,4 @@
-"""Unit tests for DockerOracle.reconnect()."""
+"""Unit tests for ContainerOracle.reconnect()."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from docker.errors import NotFound
 
-from oracle_dmp_converter.docker_oracle import DEFAULT_CONTAINER_RUNTIME, DockerOracle
 from oracle_dmp_converter.errors import DockerContainerError
+from oracle_dmp_converter.runtime.container_oracle import DEFAULT_CONTAINER_RUNTIME, ContainerOracle
 
 
 def _make_mock_container(
@@ -40,22 +40,26 @@ class TestReconnectSuccess:
         mock_container = _make_mock_container()
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(
                 name="oracle-dmp-converter-abc123",
                 image="gvenzl/oracle-free:23-faststart",
                 service="FREEPDB1",
                 runtime="docker",
             )
 
-        assert isinstance(result, DockerOracle)
+        assert isinstance(result, ContainerOracle)
 
     def test_started_is_true(self) -> None:
         mock_container = _make_mock_container()
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(
                 name="oracle-dmp-converter-abc123",
                 image="gvenzl/oracle-free:23-faststart",
             )
@@ -66,8 +70,10 @@ class TestReconnectSuccess:
         mock_container = _make_mock_container()
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(name="oracle-dmp-converter-abc123")
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(name="oracle-dmp-converter-abc123")
 
         assert result.name == "oracle-dmp-converter-abc123"
 
@@ -75,8 +81,10 @@ class TestReconnectSuccess:
         mock_container = _make_mock_container(oracle_password="TopSecret_42")
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(name="oracle-dmp-converter-abc123")
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(name="oracle-dmp-converter-abc123")
 
         assert result.password == "TopSecret_42"
 
@@ -90,8 +98,10 @@ class TestReconnectSuccess:
         container.reload.return_value = None
         mock_client = _make_mock_client(container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(name="oracle-dmp-converter-abc123")
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(name="oracle-dmp-converter-abc123")
 
         assert result.password == ""
 
@@ -105,8 +115,10 @@ class TestReconnectSuccess:
         container.reload.return_value = None
         mock_client = _make_mock_client(container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(name="oracle-dmp-converter-abc123")
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(name="oracle-dmp-converter-abc123")
 
         assert result.password == ""
 
@@ -114,8 +126,10 @@ class TestReconnectSuccess:
         mock_container = _make_mock_container()
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(
                 name="oracle-dmp-converter-abc123",
                 image="gvenzl/oracle-free:21-faststart",
             )
@@ -126,8 +140,10 @@ class TestReconnectSuccess:
         mock_container = _make_mock_container()
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            result = DockerOracle.reconnect(
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            result = ContainerOracle.reconnect(
                 name="oracle-dmp-converter-abc123",
                 service="XEPDB1",
             )
@@ -139,9 +155,9 @@ class TestReconnectSuccess:
         mock_client = _make_mock_client(mock_container)
 
         with patch(
-            "oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
         ) as mock_dc:
-            DockerOracle.reconnect(name="oracle-dmp-converter-abc123")
+            ContainerOracle.reconnect(name="oracle-dmp-converter-abc123")
 
         mock_dc.assert_called_once_with(DEFAULT_CONTAINER_RUNTIME)
 
@@ -150,9 +166,9 @@ class TestReconnectSuccess:
         mock_client = _make_mock_client(mock_container)
 
         with patch(
-            "oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
         ) as mock_dc:
-            result = DockerOracle.reconnect(
+            result = ContainerOracle.reconnect(
                 name="oracle-dmp-converter-abc123",
                 runtime="podman",
             )
@@ -164,8 +180,10 @@ class TestReconnectSuccess:
         mock_container = _make_mock_container()
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
-            DockerOracle.reconnect(name="oracle-dmp-converter-abc123")
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
+            ContainerOracle.reconnect(name="oracle-dmp-converter-abc123")
 
         mock_client.containers.get.assert_called_once_with("oracle-dmp-converter-abc123")
 
@@ -175,22 +193,28 @@ class TestReconnectFailures:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
             with pytest.raises(DockerContainerError, match="not found"):
-                DockerOracle.reconnect(name="oracle-dmp-converter-gone")
+                ContainerOracle.reconnect(name="oracle-dmp-converter-gone")
 
     def test_raises_when_container_not_running(self) -> None:
         mock_container = _make_mock_container(running=False, status="exited")
         mock_client = _make_mock_client(mock_container)
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
             with pytest.raises(DockerContainerError, match="not running"):
-                DockerOracle.reconnect(name="oracle-dmp-converter-stopped")
+                ContainerOracle.reconnect(name="oracle-dmp-converter-stopped")
 
     def test_error_message_includes_container_name(self) -> None:
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = NotFound("not found")
 
-        with patch("oracle_dmp_converter.docker_oracle._docker_client", return_value=mock_client):
+        with patch(
+            "oracle_dmp_converter.runtime.container_oracle._docker_client", return_value=mock_client
+        ):
             with pytest.raises(DockerContainerError, match="oracle-dmp-converter-gone"):
-                DockerOracle.reconnect(name="oracle-dmp-converter-gone")
+                ContainerOracle.reconnect(name="oracle-dmp-converter-gone")

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from oracle_dmp_converter.datapump.legacy.parfile import LegacyImportJob
 from oracle_dmp_converter.datapump.legacy.runner import LegacyRunner

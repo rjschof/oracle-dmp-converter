@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from oracle_dmp_converter.io.state import ChunkState, StateStore
+from oracle_dmp_converter.persistence.state import ChunkState, StateStore
 
 
 def test_state_store_upserts_and_reads_chunk_state(tmp_path: Path) -> None:
