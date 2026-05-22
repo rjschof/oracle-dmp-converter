@@ -88,7 +88,7 @@ The tool uses the Docker SDK Python library for container management but runs `d
 | `ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME` | `docker` (default) or `podman` |
 | `ORACLE_DMP_CONVERTER_IMAGE` | Override Oracle image tag |
 | `ORACLE_DMP_CONVERTER_DOCKER_PLATFORM` | Override `--platform` (set `linux/amd64` on Apple Silicon) |
-| `DMP_TO_PARQUET_ORACLE_IMAGE` | Override Oracle image for integration tests specifically |
+| `DMP_CONVERTER_ORACLE_IMAGE` | Override Oracle image for integration tests specifically |
 
 ---
 
