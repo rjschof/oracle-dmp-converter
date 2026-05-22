@@ -42,6 +42,11 @@ class ConverterSettings:
         container_runtime: Container runtime CLI (``"docker"`` or ``"podman"``).
             Reads ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` at instantiation
             when not given explicitly.
+        userns_mode: User-namespace mode passed to the container runtime (e.g.
+            ``"keep-id"`` for rootless Podman).  ``None`` leaves the runtime
+            default.  Most rootless Podman deployments do not need this because
+            ``_ensure_mount_path_permissions`` already widens host directory
+            permissions to accommodate Oracle UID 54321.
         config: Optional per-table and per-column overrides.
         keep_alive: When ``True``, leave the Oracle container running and
             preserve ``session.json`` on :meth:`OracleDMPConverter.stop`.
@@ -54,6 +59,7 @@ class ConverterSettings:
     output_format: OutputFormat = OutputFormat.PARQUET
     oracle_image: str = field(default_factory=_default_oracle_image)
     container_runtime: str = field(default_factory=_default_container_runtime)
+    userns_mode: str | None = None
     config: ConverterConfig | None = None
     keep_alive: bool = False
 

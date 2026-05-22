@@ -64,4 +64,5 @@ def start_or_reconnect(settings: ConverterSettings) -> ContainerOracle:
             *work_subdir_mounts,
         ),
         runtime=settings.container_runtime,
+        userns_mode=settings.userns_mode,
     )

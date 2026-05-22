@@ -289,9 +289,7 @@ class TestTableToRecords:
         """datetime.datetime values are converted to epoch microseconds."""
         schema = pa.schema([pa.field("ts", pa.timestamp("us"))])
         dt = datetime.datetime(2024, 6, 1, 12, 0, 0)
-        table = pa.Table.from_arrays(
-            [pa.array([dt], type=pa.timestamp("us"))], schema=schema
-        )
+        table = pa.Table.from_arrays([pa.array([dt], type=pa.timestamp("us"))], schema=schema)
         records = _table_to_records(table, schema)
         epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
         aware = dt.replace(tzinfo=datetime.UTC)

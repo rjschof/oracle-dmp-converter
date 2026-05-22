@@ -89,6 +89,35 @@ class TestDoctorCommand:
             result = CliRunner().invoke(main, ["doctor", "--container-runtime", "podman"])
         assert result.exit_code == 0
 
+    def test_warns_when_podman_socket_missing(self) -> None:
+        with (
+            patch("oracle_dmp_converter.cli.commands.docker_available", return_value=True),
+            patch("oracle_dmp_converter.cli.commands._podman_socket_url", return_value=None),
+            patch("oracle_dmp_converter.cli.commands._selinux_enforcing", return_value=False),
+        ):
+            result = CliRunner().invoke(main, ["doctor", "--container-runtime", "podman"])
+        assert result.exit_code == 0
+        assert "podman.socket" in result.output
+
+    def test_no_socket_warning_for_docker_runtime(self) -> None:
+        with (
+            patch("oracle_dmp_converter.cli.commands.docker_available", return_value=True),
+            patch("oracle_dmp_converter.cli.commands._selinux_enforcing", return_value=False),
+        ):
+            result = CliRunner().invoke(main, ["doctor", "--container-runtime", "docker"])
+        assert result.exit_code == 0
+        assert "podman.socket" not in result.output
+
+    def test_prints_selinux_info_when_enforcing(self) -> None:
+        with (
+            patch("oracle_dmp_converter.cli.commands.docker_available", return_value=True),
+            patch("oracle_dmp_converter.cli.commands._podman_socket_url", return_value=None),
+            patch("oracle_dmp_converter.cli.commands._selinux_enforcing", return_value=True),
+        ):
+            result = CliRunner().invoke(main, ["doctor", "--container-runtime", "podman"])
+        assert result.exit_code == 0
+        assert "SELinux" in result.output
+
 
 # ---------------------------------------------------------------------------
 # inspect

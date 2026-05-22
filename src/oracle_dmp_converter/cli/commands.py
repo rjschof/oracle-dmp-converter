@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from oracle_dmp_converter.persistence.serialization import load_manifest, save_p
 from oracle_dmp_converter.planner import plan_tables
 from oracle_dmp_converter.runtime.container_oracle import (
     DEFAULT_CONTAINER_RUNTIME,
+    _podman_socket_url,
     docker_available,
 )
 from oracle_dmp_converter.runtime.session import cleanup_stale_session, session_path_for
@@ -47,6 +49,16 @@ def _container_options(func: Callable) -> Callable:
         default=_default_image,
         show_default="gvenzl/oracle-free:23-faststart",
     )(func)
+    func = click.option(
+        "--userns-mode",
+        default=None,
+        show_default=False,
+        help=(
+            "User-namespace mode passed to the container runtime "
+            "(e.g. 'keep-id' for rootless Podman). "
+            "Most rootless Podman setups do not need this."
+        ),
+    )(func)
     return func
 
 
@@ -76,6 +88,7 @@ def _build_settings(
     oracle_image: str,
     oracle_password: str,
     container_runtime: str,
+    userns_mode: str | None = None,
     output_dir: Path | None = None,
     output_format: OutputFormat = OutputFormat.PARQUET,
     config=None,
@@ -90,11 +103,21 @@ def _build_settings(
             output_format=output_format,
             oracle_image=oracle_image,
             container_runtime=container_runtime,
+            userns_mode=userns_mode,
             config=config,
             keep_alive=keep_alive,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _selinux_enforcing() -> bool:
+    """Return ``True`` if SELinux is currently in Enforcing mode."""
+    try:
+        result = subprocess.run(["getenforce"], capture_output=True, text=True, check=False)
+        return result.returncode == 0 and result.stdout.strip().lower() == "enforcing"
+    except OSError:
+        return False
 
 
 @click.command()
@@ -110,6 +133,24 @@ def doctor(container_runtime: str) -> None:
         LOGGER.info("%s is available", container_runtime)
     else:
         raise click.ClickException(f"{container_runtime} is not available")
+
+    if container_runtime == "podman":
+        socket_url = _podman_socket_url()
+        if socket_url is None:
+            click.echo(
+                "WARNING: Podman socket not found. "
+                "Start it with: systemctl --user enable --now podman.socket",
+                err=True,
+            )
+        else:
+            LOGGER.info("Podman socket found at %s", socket_url)
+
+    if _selinux_enforcing():
+        click.echo(
+            "INFO: SELinux is Enforcing. "
+            "Bind mounts will be relabelled with :z (shared) when using Podman."
+        )
+
     LOGGER.info("Python dependencies are importable")
 
 
@@ -123,6 +164,7 @@ def inspect(
     oracle_image: str,
     oracle_password: str,
     container_runtime: str | None,
+    userns_mode: str | None,
 ) -> None:
     """Inspect a Data Pump dump and write ``<work-dir>/manifest.json``."""
     runtime = container_runtime or _default_runtime()
@@ -140,6 +182,7 @@ def inspect(
         oracle_image=oracle_image,
         oracle_password=oracle_password,
         container_runtime=runtime,
+        userns_mode=userns_mode,
         keep_alive=True,
     )
     try:
@@ -265,6 +308,7 @@ def convert(
     oracle_image: str,
     oracle_password: str,
     container_runtime: str | None,
+    userns_mode: str | None,
     keep_alive: bool,
 ) -> None:
     """Convert all tables in a plan, or inspect/plan/convert in one go."""
@@ -308,6 +352,7 @@ def convert(
         oracle_image=effective_image,
         oracle_password=oracle_password,
         container_runtime=effective_runtime,
+        userns_mode=userns_mode,
         output_dir=output_dir,
         output_format=fmt,
         config=config,

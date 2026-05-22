@@ -381,3 +381,133 @@ class TestContainerOracleStart:
         ):
             with pytest.raises(DockerContainerError):
                 ContainerOracle.start(image="ok:latest", password="pw")
+
+
+# ---------------------------------------------------------------------------
+# SELinux :z relabeling on Podman mounts
+# ---------------------------------------------------------------------------
+
+
+class TestPodmanSelinuxMountLabeling:
+    """Verify that bind-mount modes get the ,z suffix when runtime=podman."""
+
+    def _captured_volumes(self, tmp_path: Path, runtime: str) -> dict[str, dict[str, str]]:
+        """Start a container and return the volumes dict passed to containers.run()."""
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        with (
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._docker_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._ensure_mount_path_permissions",
+                side_effect=lambda path, mode: path.resolve(),
+            ),
+        ):
+            ContainerOracle.start(
+                image="img:latest",
+                password="pw",
+                mounts=((tmp_path, "/dumps", "rw"),),
+                runtime=runtime,
+            )
+        _, kwargs = mock_client.containers.run.call_args
+        return kwargs["volumes"]
+
+    def test_podman_appends_z_to_mode(self, tmp_path: Path) -> None:
+        volumes = self._captured_volumes(tmp_path, "podman")
+        assert len(volumes) == 1
+        mode = next(iter(volumes.values()))["mode"]
+        assert mode == "rw,z"
+
+    def test_docker_does_not_append_z(self, tmp_path: Path) -> None:
+        volumes = self._captured_volumes(tmp_path, "docker")
+        mode = next(iter(volumes.values()))["mode"]
+        assert mode == "rw"
+        assert ",z" not in mode
+
+    def test_podman_readonly_mount_gets_z(self, tmp_path: Path) -> None:
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        with (
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._docker_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._ensure_mount_path_permissions",
+                side_effect=lambda path, mode: path.resolve(),
+            ),
+        ):
+            ContainerOracle.start(
+                image="img:latest",
+                password="pw",
+                mounts=((tmp_path, "/data", "ro"),),
+                runtime="podman",
+            )
+        _, kwargs = mock_client.containers.run.call_args
+        mode = next(iter(kwargs["volumes"].values()))["mode"]
+        assert mode == "ro,z"
+
+
+# ---------------------------------------------------------------------------
+# userns_mode passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestUsernsMode:
+    def test_userns_mode_passed_to_containers_run(self) -> None:
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        with (
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._docker_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._ensure_mount_path_permissions",
+                side_effect=lambda path, mode: path.resolve(),
+            ),
+        ):
+            ContainerOracle.start(
+                image="img:latest",
+                password="pw",
+                runtime="podman",
+                userns_mode="keep-id",
+            )
+        _, kwargs = mock_client.containers.run.call_args
+        assert kwargs.get("userns_mode") == "keep-id"
+
+    def test_userns_mode_none_not_passed(self) -> None:
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        with (
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._docker_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "oracle_dmp_converter.runtime.container_oracle._ensure_mount_path_permissions",
+                side_effect=lambda path, mode: path.resolve(),
+            ),
+        ):
+            ContainerOracle.start(image="img:latest", password="pw", runtime="docker")
+        _, kwargs = mock_client.containers.run.call_args
+        assert "userns_mode" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# docker_available — simplified version check
+# ---------------------------------------------------------------------------
+
+
+class TestDockerAvailableVersionCheck:
+    def test_calls_version_without_format_flag(self) -> None:
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = docker_available("podman")
+        assert result is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["podman", "version"]
+        assert "--format" not in cmd

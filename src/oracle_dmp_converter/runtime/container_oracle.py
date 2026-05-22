@@ -37,14 +37,16 @@ def docker_available(runtime: str = DEFAULT_CONTAINER_RUNTIME) -> bool:
 
     Args:
         runtime: Container runtime executable name (e.g. ``"docker"`` or
-            ``"podman"``).
+            ``"podman"``).  For rootless Podman there is no separate daemon
+            process, so the check uses ``version`` without a format string to
+            avoid Go-template fields that only exist in Docker.
 
     Returns:
         ``True`` if the runtime's ``version`` command exits with status 0,
         ``False`` otherwise.
     """
     result = subprocess.run(
-        [runtime, "version", "--format", "{{json .Server.Version}}"],
+        [runtime, "version"],
         capture_output=True,
         text=True,
         check=False,
@@ -53,7 +55,26 @@ def docker_available(runtime: str = DEFAULT_CONTAINER_RUNTIME) -> bool:
 
 
 def _podman_socket_url() -> str | None:
-    """Return a ``unix://`` URL for the first running Podman machine, or ``None``."""
+    """Return a ``unix://`` URL for a running Podman socket, or ``None``.
+
+    Probes candidate locations in priority order:
+
+    1. **Linux rootless** — ``$XDG_RUNTIME_DIR/podman/podman.sock`` (set by
+       ``podman system service`` on Linux when running as a non-root user).
+    2. **Explicit temp socket** — ``/tmp/podman.sock`` (common when the service
+       is started with ``podman system service unix:///tmp/podman.sock``).
+    3. **Podman Machine** (macOS / Windows) — ``podman machine inspect`` output.
+    """
+    # 1. Linux rootless socket via XDG_RUNTIME_DIR
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    for candidate in (
+        Path(xdg_runtime) / "podman" / "podman.sock",
+        Path("/tmp/podman.sock"),
+    ):
+        if candidate.exists():
+            return f"unix://{candidate}"
+
+    # 2. Podman Machine (macOS / Windows)
     try:
         result = subprocess.run(
             ["podman", "machine", "inspect"],
@@ -206,6 +227,9 @@ class ContainerOracle:
         mounts: Sequence of ``(host_path, container_path, mode)`` triples
             describing bind mounts added at startup.
         runtime: Container runtime CLI (``"docker"`` or ``"podman"``).
+        userns_mode: User-namespace mode passed to the container runtime
+            (e.g. ``"keep-id"`` for rootless Podman).  ``None`` disables the
+            option.
         started: ``True`` once :meth:`_start_container` has succeeded.
     """
 
@@ -216,6 +240,7 @@ class ContainerOracle:
     platform: str | None = None
     mounts: tuple[tuple[Path, str, str], ...] = ()
     runtime: str = DEFAULT_CONTAINER_RUNTIME
+    userns_mode: str | None = None
     started: bool = False
     _client: docker.DockerClient | None = field(default=None, init=False, repr=False)
     _container: Any | None = field(default=None, init=False, repr=False)
@@ -231,6 +256,7 @@ class ContainerOracle:
         platform: str | None = None,
         mounts: tuple[tuple[Path, str, str], ...] = (),
         runtime: str | None = None,
+        userns_mode: str | None = None,
     ) -> ContainerOracle:
         """Create and start a new Oracle Free container.
 
@@ -251,6 +277,8 @@ class ContainerOracle:
                 triples, e.g. ``((Path("/dumps"), "/dumps", "rw"),)``.
             runtime: Container runtime override; falls back to
                 ``ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME`` or ``"docker"``.
+            userns_mode: User-namespace mode (e.g. ``"keep-id"`` for rootless
+                Podman).  ``None`` leaves the runtime default.
 
         Returns:
             A :class:`ContainerOracle` instance with :attr:`started` set to
@@ -271,6 +299,7 @@ class ContainerOracle:
             mounts=mounts,
             runtime=runtime
             or os.environ.get("ORACLE_DMP_CONVERTER_CONTAINER_RUNTIME", DEFAULT_CONTAINER_RUNTIME),
+            userns_mode=userns_mode,
         )
         container._start_container()
         return container
@@ -377,11 +406,20 @@ class ContainerOracle:
         volumes: dict[str, dict[str, str]] = {}
         for host_path, container_path, mode in self.mounts:
             prepared = _ensure_mount_path_permissions(host_path, mode)
-            volumes[str(prepared)] = {"bind": container_path, "mode": mode}
+            # Podman on SELinux-enforcing systems requires the :z relabel option so
+            # the container process can access host-mounted directories.  Appending
+            # ",z" to the mode string (e.g. "rw,z") instructs Podman to apply a
+            # shared SELinux relabel at mount time.  This is a no-op on systems
+            # without SELinux and is ignored by Docker.
+            effective_mode = f"{mode},z" if self.runtime == "podman" else mode
+            volumes[str(prepared)] = {"bind": container_path, "mode": effective_mode}
 
         ports = {"1521/tcp": ("127.0.0.1", None)}
         self._client = _docker_client(self.runtime)
         LOGGER.info("Starting Oracle container %s (image=%s)", self.name, self.image)
+        extra_kwargs: dict[str, object] = {}
+        if self.userns_mode is not None:
+            extra_kwargs["userns_mode"] = self.userns_mode
         try:
             self._container = self._client.containers.run(
                 self.image,
@@ -393,6 +431,7 @@ class ContainerOracle:
                 ports=ports,
                 platform=self.platform,
                 volumes=volumes or None,
+                **extra_kwargs,
             )
         except ImageNotFound as exc:
             raise DockerImageError(f"Docker image not found: {self.image}") from exc
