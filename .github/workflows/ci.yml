@@ -66,8 +66,8 @@ jobs:
           path: htmlcov/
           retention-days: 7
 
-  integration-tests:
-    name: Integration Tests
+  modern-integration-tests:
+    name: Modern DMP Integration Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,8 +79,27 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
-      - name: Run integration tests
-        run: uv run pytest tests/integration -v
+      - name: Run modern DMP integration tests
+        run: uv run pytest tests/integration/test_data_modern_dump.py -v
+        env:
+          DMP_CONVERTER_IMAGE: gvenzl/oracle-free:23-faststart
+        timeout-minutes: 30
+
+  legacy-integration-tests:
+    name: Legacy DMP Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Run legacy DMP integration tests
+        run: uv run pytest tests/integration/test_data_legacy_dump.py -v
         env:
           DMP_CONVERTER_IMAGE: gvenzl/oracle-free:23-faststart
         timeout-minutes: 30
