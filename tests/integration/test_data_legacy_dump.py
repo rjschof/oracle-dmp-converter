@@ -1,13 +1,17 @@
 """Integration tests for tests/data/legacy.dmp (legacy exp format).
 
-The dump contains the full combined sample database:
+The dump is produced by ``scripts/create_full_combined_dump.py``.  Legacy
+``exp`` cannot serialise several audit-extension features (identity
+columns, native JSON, virtual columns, RANGE-HASH composite partitions,
+BFILE) so the dump is intentionally partial: tables with those features
+are absent from the dump.  When the converter inspects + plans + converts
+them, they appear in the conversion report's ``skipped`` list with a
+"staging table absent" reason.  In addition, legacy exp lacks the column
+infrastructure to round-trip object/VARRAY/nested-table types, so those
+columns are also marked UNSUPPORTED by the planner.
 
-    HRDATA:     DEPARTMENTS(5), JOBS(10), EMPLOYEES(30)
-    INVENTORY:  WAREHOUSES(3), PRODUCTS(24), STOCK_LEVELS(45)
-    FINANCE:    ACCOUNTS(20), TRANSACTIONS(100), MV_ACCOUNT_SUMMARY(20)
-    AUDITLOG:   CHANGE_LOG(50)
-
-Legacy exp format forces WHOLE_TABLE strategy for every table (no HASH or PARTITION).
+Legacy exp format forces WHOLE_TABLE strategy for every successfully
+exported table (no HASH or PARTITION).
 
 A single Oracle container is shared across inspect, plan, convert, convert_avro,
 and convert_csv via the ``shared_work`` module-scoped fixture.  The fixture runs
@@ -57,12 +61,50 @@ _LEGACY_DUMP = _DATA_DIR / "legacy.dmp"
 
 
 _EXPECTED_ROWS: dict[str, dict[str, int]] = {
-    "HRDATA": {"DEPARTMENTS": 5, "JOBS": 10, "EMPLOYEES": 30},
-    "INVENTORY": {"WAREHOUSES": 3, "PRODUCTS": 24, "STOCK_LEVELS": 45},
-    "FINANCE": {"ACCOUNTS": 20, "TRANSACTIONS": 100, "MV_ACCOUNT_SUMMARY": 20},
-    "AUDITLOG": {"CHANGE_LOG": 50},
+    "AUDITLOG": {
+        "CHANGE_LOG": 50,
+    },
+    "FINANCE": {
+        "ACCOUNTS": 20,
+        "CHECK_NOT_NULL": 5,
+        "MV_ACCOUNT_SUMMARY": 20,
+        "NUMERIC_EDGE": 3,
+        "TRANSACTIONS": 100,
+        "TRANSACTION_DETAILS": 80,
+    },
+    "HRDATA": {
+        "DEPARTMENTS": 5,
+        "DEPT_LOCATIONS": 4,
+        "EMP_PREFERENCES": 30,
+        "JOBS": 10,
+        # Legacy exp mangles the mixed-case identifier so the staging
+        # import succeeds but no data round-trips.
+        "MixedCase_Table": 0,
+    },
+    "INVENTORY": {
+        "PRODUCTS": 24,
+        "STOCK_LEVELS": 45,
+        "STORE_LOCATIONS": 3,
+        "SUPPLIERS": 10,
+        "SUPPLIER_NOTES": 15,
+        "WAREHOUSES": 3,
+    },
 }
-_TOTAL_ROWS = 307
+_TOTAL_ROWS = sum(n for tbl in _EXPECTED_ROWS.values() for n in tbl.values())
+
+# Tables present in the legacy dump's manifest that don't make it to
+# convert output, either because legacy exp produced incomplete
+# metadata for them (IDENTITY / JSON columns) or because their column
+# types are unexportable (BFILE, user-defined OBJECT / VARRAY).
+_EXPECTED_SKIPPED: set[tuple[str, str]] = {
+    ("AUDITLOG", "ATTACHMENTS"),
+    ("FINANCE", "CUSTOMER_PROFILE"),
+    ("HRDATA", "DEPT_LOCATION_PHONES"),
+    ("HRDATA", "EMP_TAGS"),
+    ("INVENTORY", "ORDERS"),
+    ("INVENTORY", "ORDER_ITEMS"),
+    ("INVENTORY", "PRODUCT_SPECS"),
+}
 
 _PASSWORD = "OraclePwd_123"
 
@@ -148,10 +190,16 @@ def _assert_output(output_dir: Path, output_format: OutputFormat, ext: str) -> N
             assert actual_rows == expected_rows, (
                 f"{schema_name}.{table_name}: expected {expected_rows} rows, got {actual_rows}"
             )
+    # Skipped tables must not have any parquet files left behind.
+    for schema_name, table_name in _EXPECTED_SKIPPED:
+        files = list((output_dir / schema_name / table_name).glob(f"*.{ext}"))
+        assert not files, (
+            f"Skipped table {schema_name}.{table_name} unexpectedly produced output files: {files}"
+        )
 
 
 def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
-    """Assert conversion_report.yaml and conversion_report.json exist with correct totals."""
+    """Assert the conversion report carries the expected totals + skipped set."""
     yaml_report = work_dir / "conversion_report.yaml"
     json_report = work_dir / "conversion_report.json"
     assert yaml_report.exists(), "conversion_report.yaml was not written"
@@ -163,7 +211,10 @@ def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
         f"got {stats['total_output_rows']}"
     )
     assert stats["tables_converted"] > 0, "Report shows no converted tables"
-    assert stats["tables_skipped"] == 0, f"Unexpected skipped tables: {stats['tables_skipped']}"
+    actual_skipped = {(s["schema"], s["table"]) for s in report.get("skipped", [])}
+    assert actual_skipped == _EXPECTED_SKIPPED, (
+        f"Skipped-table set mismatch: expected {_EXPECTED_SKIPPED}, got {actual_skipped}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +231,9 @@ def test_legacy_inspect(shared_work: SimpleNamespace) -> None:
         f"Expected DumpFormat.LEGACY, got {manifest.dump_format}"
     )
     table_names = {t.name for t in manifest.tables}
+    # Manifest should contain every table whose data we expect to
+    # convert.  Tables in _EXPECTED_SKIPPED may or may not appear in the
+    # manifest depending on whether legacy exp wrote any DDL for them.
     for schema_tables in _EXPECTED_ROWS.values():
         for table_name in schema_tables:
             assert table_name in table_names, (
@@ -195,9 +249,13 @@ def test_legacy_plan(shared_work: SimpleNamespace) -> None:
     assert plan.dump_format == DumpFormat.LEGACY, (
         f"Expected DumpFormat.LEGACY in plan, got {plan.dump_format}"
     )
+    # Every supported table in a legacy dump uses WHOLE_TABLE — legacy
+    # ``imp`` has no QUERY filter so per-partition imports aren't
+    # possible.  Tables with unexportable column types (BFILE, object
+    # types) may show up as UNSUPPORTED instead.
     for tp in plan.tables:
-        assert tp.strategy == TableStrategy.WHOLE_TABLE, (
-            f"{tp.table}: expected WHOLE_TABLE strategy for legacy dump, got {tp.strategy}"
+        assert tp.strategy in (TableStrategy.WHOLE_TABLE, TableStrategy.UNSUPPORTED), (
+            f"{tp.table}: expected WHOLE_TABLE or UNSUPPORTED for legacy dump, got {tp.strategy}"
         )
 
 

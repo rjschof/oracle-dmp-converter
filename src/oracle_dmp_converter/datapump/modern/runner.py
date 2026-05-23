@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from oracle_dmp_converter.datapump._base_runner import _BaseRunner
+from oracle_dmp_converter.datapump._exit_policy import EXPDP_POLICY, IMPDP_POLICY
 from oracle_dmp_converter.datapump.modern.parfile import (
     BatchImportJob,
     BulkMetadataImportJob,
@@ -47,7 +48,7 @@ class DataPumpRunner(_BaseRunner):
         Returns:
             Combined stdout + stderr from the ``expdp`` invocation.
         """
-        return self._run_tool(["expdp"], render_export_parfile(job), "expdp")
+        return self._run_tool(["expdp"], render_export_parfile(job), "expdp", policy=EXPDP_POLICY)
 
     def run_impdp(self, job: ImportJob) -> str:
         """Run an ``impdp`` import job and return the combined output.
@@ -61,7 +62,7 @@ class DataPumpRunner(_BaseRunner):
         Returns:
             Combined stdout + stderr from the ``impdp`` invocation.
         """
-        return self._run_tool(["impdp"], render_import_parfile(job), "impdp")
+        return self._run_tool(["impdp"], render_import_parfile(job), "impdp", policy=IMPDP_POLICY)
 
     def run_batch_impdp(self, job: BatchImportJob) -> str:
         """Run a single ``impdp`` call that imports multiple tables at once.
@@ -76,7 +77,9 @@ class DataPumpRunner(_BaseRunner):
         Returns:
             Combined stdout + stderr from the ``impdp`` invocation.
         """
-        return self._run_tool(["impdp"], render_batch_import_parfile(job), "impdp-batch")
+        return self._run_tool(
+            ["impdp"], render_batch_import_parfile(job), "impdp-batch", policy=IMPDP_POLICY
+        )
 
     def run_bulk_metadata_impdp(self, job: BulkMetadataImportJob) -> str:
         """Run a schema-wide ``impdp CONTENT=METADATA_ONLY`` job without a ``TABLES=`` filter.
@@ -91,7 +94,10 @@ class DataPumpRunner(_BaseRunner):
             Combined stdout + stderr from the ``impdp`` invocation.
         """
         return self._run_tool(
-            ["impdp"], render_bulk_metadata_import_parfile(job), "impdp-bulk-meta"
+            ["impdp"],
+            render_bulk_metadata_import_parfile(job),
+            "impdp-bulk-meta",
+            policy=IMPDP_POLICY,
         )
 
     def run_sqlfile(self, job: SqlFileJob) -> str:
@@ -110,7 +116,9 @@ class DataPumpRunner(_BaseRunner):
         Returns:
             Combined stdout + stderr from the ``impdp`` invocation.
         """
-        return self._run_tool(["impdp"], render_sqlfile_parfile(job), "impdp-sqlfile")
+        return self._run_tool(
+            ["impdp"], render_sqlfile_parfile(job), "impdp-sqlfile", policy=IMPDP_POLICY
+        )
 
     def read_remote_file(self, path: str) -> str:
         """Read a file from inside the container, returning its contents or ''."""

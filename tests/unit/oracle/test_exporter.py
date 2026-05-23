@@ -13,8 +13,11 @@ import pytest
 
 from oracle_dmp_converter.config import ColumnOverride
 from oracle_dmp_converter.models import ColumnMetadata, OutputFormat
+from oracle_dmp_converter.oracle import exporter as exporter_module
 from oracle_dmp_converter.oracle.exporter import (
     _coerce_value,
+    _db_object_to_text,
+    _field_metadata_for,
     _read_lob,
     _rows_to_table,
     arrow_schema_for_columns,
@@ -52,7 +55,9 @@ class TestArrowTypeForColumn:
         assert arrow_type_for_column(_col("NUMBER", 20, 4)) == pa.decimal128(20, 4)
 
     def test_number_unconstrained(self) -> None:
-        assert arrow_type_for_column(_col("NUMBER")) == pa.float64()
+        # Unbounded NUMBER now maps to the widest fixed-precision decimal
+        # so values past 2^53 round-trip without silent precision loss.
+        assert arrow_type_for_column(_col("NUMBER")) == pa.decimal128(38, 0)
 
     def test_varchar2(self) -> None:
         assert arrow_type_for_column(_col("VARCHAR2")) == pa.string()
@@ -306,3 +311,106 @@ def test_export_table_calls_write_batch_for_rows(tmp_path: Path) -> None:
     mock_writer.write_batch.assert_called_once()
     mock_writer.write_empty.assert_not_called()
     assert result.rows == 2
+
+
+# ---------------------------------------------------------------------------
+# DbObject serialisation + Arrow field metadata
+# ---------------------------------------------------------------------------
+
+
+class _FakeAttr:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeType:
+    def __init__(self, *, iscollection: bool, attr_names: tuple[str, ...] = ()) -> None:
+        self.iscollection = iscollection
+        self.attributes = tuple(_FakeAttr(n) for n in attr_names)
+
+
+class _FakeDbObject:
+    """Minimal stand-in for ``oracledb.DbObject`` for unit testing."""
+
+    def __init__(self, *, attrs: dict | None = None, items: list | None = None) -> None:
+        if items is not None:
+            self.type = _FakeType(iscollection=True)
+            self._items = items
+        else:
+            attrs = attrs or {}
+            self.type = _FakeType(iscollection=False, attr_names=tuple(attrs.keys()))
+            for name, value in attrs.items():
+                setattr(self, name, value)
+
+    def aslist(self) -> list:
+        return self._items
+
+
+class TestDbObjectToText:
+    def test_object_type_serialises_attrs_as_json(self) -> None:
+        # Patch the isinstance check inside _db_object_to_text so it
+        # treats our fake as a real DbObject.  Easier than importing
+        # the real type, which the test doesn't have a live container for.
+        with patch.object(exporter_module, "oracledb") as mock_oracledb:
+            mock_oracledb.DbObject = _FakeDbObject
+            result = _db_object_to_text(_FakeDbObject(attrs={"street": "1 Main", "zip": "12345"}))
+        assert '"street": "1 Main"' in result
+        assert '"zip": "12345"' in result
+
+    def test_collection_serialises_as_list(self) -> None:
+        with patch.object(exporter_module, "oracledb") as mock_oracledb:
+            mock_oracledb.DbObject = _FakeDbObject
+            result = _db_object_to_text(_FakeDbObject(items=["alpha", "beta"]))
+        assert result == '["alpha", "beta"]'
+
+    def test_nested_object_inside_collection(self) -> None:
+        inner = _FakeDbObject(attrs={"k": "v"})
+        outer = _FakeDbObject(items=[inner])
+        with patch.object(exporter_module, "oracledb") as mock_oracledb:
+            mock_oracledb.DbObject = _FakeDbObject
+            result = _db_object_to_text(outer)
+        assert result == '[{"k": "v"}]'
+
+    def test_datetime_attr_uses_isoformat(self) -> None:
+        with patch.object(exporter_module, "oracledb") as mock_oracledb:
+            mock_oracledb.DbObject = _FakeDbObject
+            result = _db_object_to_text(
+                _FakeDbObject(attrs={"created": datetime(2024, 1, 15, 10, 30)})
+            )
+        assert "2024-01-15T10:30:00" in result
+
+    def test_decimal_attr_becomes_string(self) -> None:
+        with patch.object(exporter_module, "oracledb") as mock_oracledb:
+            mock_oracledb.DbObject = _FakeDbObject
+            result = _db_object_to_text(_FakeDbObject(attrs={"amount": Decimal("12.50")}))
+        assert '"amount": "12.50"' in result
+
+
+class TestFieldMetadataFor:
+    def test_includes_oracle_data_type(self) -> None:
+        col = ColumnMetadata(name="EMAIL", data_type="VARCHAR2", ordinal=1)
+        metadata = _field_metadata_for(col)
+        assert metadata == {b"oracle_data_type": b"VARCHAR2"}
+
+    def test_includes_comment_when_present(self) -> None:
+        col = ColumnMetadata(
+            name="EMAIL",
+            data_type="VARCHAR2",
+            ordinal=1,
+            comment="Unique work email",
+        )
+        metadata = _field_metadata_for(col)
+        assert metadata is not None
+        assert metadata[b"oracle_comment"] == b"Unique work email"
+
+    def test_arrow_schema_attaches_metadata_to_field(self) -> None:
+        col = ColumnMetadata(
+            name="EMAIL",
+            data_type="VARCHAR2",
+            ordinal=1,
+            comment="work email",
+        )
+        schema = arrow_schema_for_columns((col,))
+        field = schema.field("EMAIL")
+        assert field.metadata is not None
+        assert field.metadata.get(b"oracle_comment") == b"work email"

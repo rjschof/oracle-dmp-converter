@@ -51,7 +51,28 @@ def build_conversion_report(
                 )
             )
         else:
-            tcr = result_by_name[tp.qualified_name]
+            tcr = result_by_name.get(tp.qualified_name)
+            if tcr is None:
+                # The table was supported in the plan but never produced a
+                # conversion result.  This happens when the staging table
+                # was missing (legacy ``exp`` dump with incomplete DDL) and
+                # ``validate_staging_tables`` filtered it out, or when the
+                # entire batch failed before reaching this table.  Record
+                # it as a skipped table so the report stays accurate
+                # rather than crashing with a KeyError.
+                skipped.append(
+                    SkippedTableReport(
+                        schema=tp.schema,
+                        table=tp.table,
+                        strategy=tp.strategy.value,
+                        reason=(
+                            "Staging table was absent at convert time "
+                            "(typically: source dump did not contain "
+                            "exportable metadata for this table)."
+                        ),
+                    )
+                )
+                continue
             for chunk_result in tcr.chunks:
                 successful.append(
                     ChunkReport(

@@ -581,23 +581,32 @@ def test_convert_does_not_validate_when_no_prior_inspect(tmp_path: Path) -> None
     mock_validate.assert_not_called()
 
 
-def test_validate_staging_tables_raises_when_table_missing(tmp_path: Path) -> None:
-    """validate_staging_tables raises ValueError listing missing staging tables."""
+def test_validate_staging_tables_filters_out_missing(tmp_path: Path) -> None:
+    """validate_staging_tables drops missing staging tables and logs a warning."""
     converter = _make_converter(ConverterConfig())
-    plan = _whole_table_plan("SRC", "ORDERS")
+    plan_a = _whole_table_plan("SRC", "ORDERS")
+    plan_b = _whole_table_plan("SRC", "INVOICES")
 
     _, mock_ctx = _mock_conn_ctx()
 
+    # Only ORDERS exists in staging; INVOICES does not.
+    def fake_exists(_conn: object, _schema: str, table: str) -> bool:
+        return table == "ORDERS"
+
     with (
         patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
-        patch("oracle_dmp_converter.core.executor.table_exists", return_value=False),
-        pytest.raises(ValueError, match="DMP_SRC.ORDERS"),
+        patch(
+            "oracle_dmp_converter.core.executor.table_exists",
+            side_effect=fake_exists,
+        ),
     ):
-        converter.validate_staging_tables([plan])
+        result = converter.validate_staging_tables([plan_a, plan_b])
+
+    assert [p.table for p in result] == ["ORDERS"]
 
 
 def test_validate_staging_tables_passes_when_all_present(tmp_path: Path) -> None:
-    """validate_staging_tables succeeds when all staging tables exist."""
+    """validate_staging_tables returns the input unchanged when all tables exist."""
     converter = _make_converter(ConverterConfig())
     plan = _whole_table_plan("SRC", "ORDERS")
 
@@ -607,4 +616,5 @@ def test_validate_staging_tables_passes_when_all_present(tmp_path: Path) -> None
         patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
         patch("oracle_dmp_converter.core.executor.table_exists", return_value=True),
     ):
-        converter.validate_staging_tables([plan])  # must not raise
+        result = converter.validate_staging_tables([plan])
+        assert result == [plan]

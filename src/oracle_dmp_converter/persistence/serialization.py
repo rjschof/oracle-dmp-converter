@@ -34,7 +34,7 @@ def column_to_dict(column: ColumnMetadata) -> dict[str, Any]:
     Returns:
         Dictionary suitable for JSON serialisation.
     """
-    return {
+    payload: dict[str, Any] = {
         "name": column.name,
         "data_type": column.data_type,
         "ordinal": column.ordinal,
@@ -44,6 +44,17 @@ def column_to_dict(column: ColumnMetadata) -> dict[str, Any]:
         "char_length": column.char_length,
         "char_used": column.char_used,
     }
+    # Only emit the newer fields when they carry information; this keeps
+    # the manifest JSON compact and stable for the common scalar-column
+    # case while still letting object-typed columns + invisible columns
+    # round-trip correctly.
+    if column.data_type_owner is not None:
+        payload["data_type_owner"] = column.data_type_owner
+    if column.hidden:
+        payload["hidden"] = True
+    if column.comment is not None:
+        payload["comment"] = column.comment
+    return payload
 
 
 def column_from_dict(data: dict[str, Any]) -> ColumnMetadata:
@@ -64,6 +75,9 @@ def column_from_dict(data: dict[str, Any]) -> ColumnMetadata:
         data_scale=data.get("data_scale"),
         char_length=data.get("char_length"),
         char_used=data.get("char_used"),
+        data_type_owner=data.get("data_type_owner"),
+        hidden=bool(data.get("hidden", False)),
+        comment=data.get("comment"),
     )
 
 
@@ -101,7 +115,7 @@ def table_metadata_to_dict(table: TableMetadata) -> dict[str, Any]:
         Dictionary containing all fields, with nested column and partition
         dicts.
     """
-    return {
+    payload: dict[str, Any] = {
         "schema": table.schema,
         "name": table.name,
         "columns": [column_to_dict(column) for column in table.columns],
@@ -111,6 +125,11 @@ def table_metadata_to_dict(table: TableMetadata) -> dict[str, Any]:
         "primary_key": list(table.primary_key),
         "unique_keys": [list(key) for key in table.unique_keys],
     }
+    if table.table_type != "TABLE":
+        payload["table_type"] = table.table_type
+    if table.comment is not None:
+        payload["comment"] = table.comment
+    return payload
 
 
 def table_metadata_from_dict(data: dict[str, Any]) -> TableMetadata:
@@ -133,6 +152,8 @@ def table_metadata_from_dict(data: dict[str, Any]) -> TableMetadata:
         ),
         primary_key=tuple(data.get("primary_key", [])),
         unique_keys=tuple(tuple(key) for key in data.get("unique_keys", [])),
+        table_type=str(data.get("table_type", "TABLE")),
+        comment=data.get("comment"),
     )
 
 
@@ -318,6 +339,7 @@ def save_session(path: Path, session: ContainerSession) -> None:
         "metadata_imported": session.metadata_imported,
         "metadata_import_time": session.metadata_import_time,
         "prepared_schemas": sorted(session.prepared_schemas),
+        "fingerprint": session.fingerprint,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -344,4 +366,5 @@ def load_session(path: Path) -> ContainerSession:
         metadata_imported=bool(data.get("metadata_imported", False)),
         metadata_import_time=str(data.get("metadata_import_time") or ""),
         prepared_schemas=frozenset(str(name) for name in (data.get("prepared_schemas") or ())),
+        fingerprint=str(data.get("fingerprint") or ""),
     )

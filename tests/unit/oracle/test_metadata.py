@@ -70,21 +70,69 @@ class TestEstimatedSegmentBytes:
 # ---------------------------------------------------------------------------
 
 
+def _col_row(
+    name: str,
+    data_type: str,
+    ordinal: int,
+    *,
+    nullable: str = "Y",
+    precision: int | None = None,
+    scale: int | None = None,
+    char_length: int | None = None,
+    char_used: str | None = None,
+    data_type_owner: str | None = None,
+    hidden: str = "NO",
+    comment: str | None = None,
+) -> tuple:
+    """Build an ALL_TAB_COLS row matching the discover_table_metadata projection."""
+    return (
+        name,
+        data_type,
+        ordinal,
+        nullable,
+        precision,
+        scale,
+        char_length,
+        char_used,
+        data_type_owner,
+        hidden,
+        comment,
+    )
+
+
+# Tuple shape returned for the ALL_TABLES + ALL_TAB_COMMENTS join:
+# (NUM_ROWS, AVG_ROW_LEN, IOT_TYPE, TEMPORARY, COMMENTS).
+def _table_row(
+    num_rows: int | None,
+    avg_row_len: int | None,
+    *,
+    iot_type: str | None = None,
+    temporary: str = "N",
+    comment: str | None = None,
+) -> tuple:
+    return (num_rows, avg_row_len, iot_type, temporary, comment)
+
+
 class TestDiscoverTableMetadata:
     def _setup_cursor(
         self,
         *,
         col_rows=None,
         seg_bytes=1024,
-        table_stats=(100, 50),
+        table_stats=None,
+        external_row=None,
         partition_rows=None,
         pk_rows=None,
         unique_rows=None,
     ) -> MagicMock:
         col_rows = col_rows or [
-            ("ID", "NUMBER", 1, "N", 10, 0, 0, "B"),
-            ("NAME", "VARCHAR2", 2, "Y", None, None, 40, "C"),
+            _col_row(
+                "ID", "NUMBER", 1, nullable="N", precision=10, scale=0, char_length=0, char_used="B"
+            ),
+            _col_row("NAME", "VARCHAR2", 2, char_length=40, char_used="C"),
         ]
+        if table_stats is None:
+            table_stats = _table_row(100, 50)
         cursor = _make_cursor()
         cursor.fetchall.side_effect = [
             col_rows,
@@ -95,6 +143,7 @@ class TestDiscoverTableMetadata:
         cursor.fetchone.side_effect = [
             (seg_bytes,),
             table_stats,
+            external_row,  # ALL_EXTERNAL_TABLES probe
         ]
         return cursor
 
@@ -109,6 +158,7 @@ class TestDiscoverTableMetadata:
         assert meta.columns[1].name == "NAME"
         assert meta.row_count == 100
         assert meta.estimated_bytes == 1024
+        assert meta.table_type == "TABLE"
 
     def test_primary_key_populated(self) -> None:
         cursor = self._setup_cursor(pk_rows=[("ID",)])
@@ -134,13 +184,14 @@ class TestDiscoverTableMetadata:
     def test_no_row_count_when_stats_none(self) -> None:
         cursor = _make_cursor()
         cursor.fetchall.side_effect = [
-            [("ID", "NUMBER", 1, "N", 10, 0, 0, "B")],
+            [_col_row("ID", "NUMBER", 1, nullable="N", precision=10, scale=0)],
             [],
             [],
             [],
         ]
         cursor.fetchone.side_effect = [
             (512,),
+            None,
             None,
         ]
         conn = _make_conn(cursor)
@@ -150,23 +201,61 @@ class TestDiscoverTableMetadata:
     def test_estimated_bytes_from_stats_when_segment_unavailable(self) -> None:
         cursor = _make_cursor()
         cursor.fetchall.side_effect = [
-            [("ID", "NUMBER", 1, "N", 10, 0, 0, "B")],
+            [_col_row("ID", "NUMBER", 1, nullable="N", precision=10, scale=0)],
             [],
             [],
             [],
         ]
         # _estimated_segment_bytes raises ORA-942 → returns None
         cursor.execute.side_effect = [
-            None,  # ALL_TAB_COLUMNS
+            None,  # ALL_TAB_COLS
             _db_error(942),  # ALL_SEGMENTS → returns None
             None,  # ALL_TABLES
+            None,  # ALL_EXTERNAL_TABLES probe
             None,  # ALL_TAB_PARTITIONS
             None,  # ALL_CONSTRAINTS PK
             None,  # ALL_CONSTRAINTS UK
         ]
         cursor.fetchone.side_effect = [
-            (100, 50),  # ALL_TABLES: 100 rows * 50 avg_row_len = 5000
+            _table_row(100, 50),  # ALL_TABLES: 100 rows * 50 avg_row_len = 5000
+            None,  # ALL_EXTERNAL_TABLES probe
         ]
         conn = _make_conn(cursor)
         meta = discover_table_metadata(conn, "S", "T")
         assert meta.estimated_bytes == 5000
+
+    def test_external_table_flagged(self) -> None:
+        cursor = self._setup_cursor(external_row=(1,))
+        conn = _make_conn(cursor)
+        meta = discover_table_metadata(conn, "S", "T")
+        assert meta.table_type == "EXTERNAL"
+
+    def test_global_temporary_table_flagged(self) -> None:
+        cursor = self._setup_cursor(
+            table_stats=_table_row(0, None, temporary="Y"),
+        )
+        conn = _make_conn(cursor)
+        meta = discover_table_metadata(conn, "S", "T")
+        assert meta.table_type == "GTT"
+
+    def test_object_type_column_captured(self) -> None:
+        cursor = self._setup_cursor(
+            col_rows=[
+                _col_row("ADDR", "ADDRESS_T", 1, data_type_owner="FINANCE"),
+            ],
+        )
+        conn = _make_conn(cursor)
+        meta = discover_table_metadata(conn, "FINANCE", "CUSTOMER_PROFILE")
+        assert meta.columns[0].data_type_owner == "FINANCE"
+
+    def test_column_and_table_comments_propagated(self) -> None:
+        cursor = self._setup_cursor(
+            col_rows=[
+                _col_row("ID", "NUMBER", 1, precision=10, scale=0, comment="primary key"),
+            ],
+            table_stats=_table_row(0, None, comment="orders master table"),
+        )
+        conn = _make_conn(cursor)
+        meta = discover_table_metadata(conn, "S", "ORDERS")
+        assert meta.columns[0].comment == "primary key"
+        assert meta.comment == "orders master table"

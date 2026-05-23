@@ -63,7 +63,14 @@ class BatchImportJob:
     table_specs: tuple[tuple[str, str, str | None], ...]
     remap_schemas: tuple[tuple[str, str], ...] = ()
     content: str | None = None
-    table_exists_action: str = "TRUNCATE"
+    # APPEND rather than TRUNCATE: staging tables are guaranteed empty after
+    # inspect's metadata-only import, so APPEND is equivalent to TRUNCATE+load
+    # for the happy path.  Critically, APPEND avoids ORA-39120 (table can't be
+    # truncated) when a reference-partitioned child table or any other enabled
+    # FK references the table being loaded.  Reference partitioning in
+    # particular *cannot* be disabled (ORA-14650), so TRUNCATE is permanently
+    # blocked for those tables and APPEND is the only workable option.
+    table_exists_action: str = "APPEND"
     exclude: tuple[str, ...] = field(
         default=("INDEX", "CONSTRAINT", "REF_CONSTRAINT", "TRIGGER", "STATISTICS", "GRANT")
     )

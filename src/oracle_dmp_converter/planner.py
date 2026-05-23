@@ -8,13 +8,70 @@ from collections.abc import Iterable
 from oracle_dmp_converter.config import ConverterConfig, table_override
 from oracle_dmp_converter.models import (
     ChunkPlan,
+    ColumnMetadata,
     DumpFormat,
     TableMetadata,
     TablePlan,
     TableStrategy,
 )
+from oracle_dmp_converter.oracle.types import UNSUPPORTED_COLUMN_TYPES
 
 LOGGER = logging.getLogger(__name__)
+
+
+# Oracle reports owner-qualified type names for some built-in types that
+# the converter handles natively (XMLTYPE is owned by PUBLIC, SDO_GEOMETRY
+# by MDSYS).  These should *not* trigger the "user-defined type" path.
+_BUILTIN_OWNED_TYPES = frozenset({"XMLTYPE", "SDO_GEOMETRY"})
+
+
+def _unsupported_column_reason(column: ColumnMetadata) -> str | None:
+    """Return a human-readable reason if *column* can't be safely exported.
+
+    ``None`` means the column is fine.  Otherwise the returned string is
+    suitable for use as ``TablePlan.reason``.
+    """
+    normalized = column.normalized_type
+    if normalized in UNSUPPORTED_COLUMN_TYPES:
+        return f"column {column.name!r} has unsupported type {normalized}"
+    if normalized in _BUILTIN_OWNED_TYPES:
+        # Owner-qualified built-ins (PUBLIC.XMLTYPE, MDSYS.SDO_GEOMETRY)
+        # have ``data_type_owner`` set but are handled natively via
+        # type-specific export expressions — let them through.
+        return None
+    # Genuine user-defined OBJECT / VARRAY / nested-table columns carry a
+    # ``data_type_owner`` value pointing at the type's owning schema.
+    # The converter cannot meaningfully serialise these via a normal
+    # SELECT — oracledb returns DbObject handles that ``str()`` to repr
+    # noise.  Mark the whole table UNSUPPORTED rather than emit garbage.
+    if column.data_type_owner:
+        return (
+            f"column {column.name!r} has user-defined type "
+            f"{column.data_type_owner}.{column.data_type}"
+        )
+    return None
+
+
+def _table_unsupported_reason(table: TableMetadata) -> str | None:
+    """Return a human-readable reason if *table* can't be exported at all.
+
+    External tables: the LOCATION file isn't bind-mounted into the
+    staging container, so the staged SELECT would raise KUP-04040.
+    Global temporary tables: rows are session-scoped and never persist
+    through Data Pump export/import, so the result would always be 0.
+    """
+    if table.table_type == "EXTERNAL":
+        return "external table — LOCATION file not available in staging container"
+    if table.table_type == "GTT":
+        return (
+            "global temporary table — data is session-scoped and does not "
+            "round-trip through Data Pump export"
+        )
+    for column in table.columns:
+        reason = _unsupported_column_reason(column)
+        if reason is not None:
+            return reason
+    return None
 
 
 def plan_table(
@@ -47,6 +104,16 @@ def plan_table(
         A :class:`TablePlan` with an appropriate strategy and chunk list.
     """
     override = table_override(config, table.schema, table.name)
+
+    unsupported = _table_unsupported_reason(table)
+    if unsupported is not None:
+        LOGGER.debug("%s.%s: strategy=unsupported (%s)", table.schema, table.name, unsupported)
+        return TablePlan(
+            schema=table.schema,
+            table=table.name,
+            strategy=TableStrategy.UNSUPPORTED,
+            reason=unsupported,
+        )
 
     if override and override.strategy == "whole":
         LOGGER.debug("%s.%s: strategy=whole (config override)", table.schema, table.name)

@@ -72,19 +72,34 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
         instance.
     """
     with conn.cursor() as cursor:
+        # ALL_TAB_COLS (not ALL_TAB_COLUMNS) exposes invisible + hidden
+        # columns alongside DATA_TYPE_OWNER (set when the column type is
+        # a user-defined OBJECT / VARRAY / nested-table) and HIDDEN_COLUMN.
+        # We need both signals: HIDDEN_COLUMN to skip virtual-column +
+        # partitioning helpers, and DATA_TYPE_OWNER so the planner can
+        # mark object-type columns UNSUPPORTED.
         cursor.execute(
             """
-            SELECT COLUMN_NAME,
-                   DATA_TYPE,
-                   COLUMN_ID,
-                   NULLABLE,
-                   DATA_PRECISION,
-                   DATA_SCALE,
-                   CHAR_LENGTH,
-                   CHAR_USED
-            FROM ALL_TAB_COLUMNS
-            WHERE OWNER = :owner AND TABLE_NAME = :table_name
-            ORDER BY COLUMN_ID
+            SELECT t.COLUMN_NAME,
+                   t.DATA_TYPE,
+                   t.COLUMN_ID,
+                   t.NULLABLE,
+                   t.DATA_PRECISION,
+                   t.DATA_SCALE,
+                   t.CHAR_LENGTH,
+                   t.CHAR_USED,
+                   t.DATA_TYPE_OWNER,
+                   t.HIDDEN_COLUMN,
+                   c.COMMENTS
+            FROM ALL_TAB_COLS t
+            LEFT JOIN ALL_COL_COMMENTS c
+                ON c.OWNER = t.OWNER
+               AND c.TABLE_NAME = t.TABLE_NAME
+               AND c.COLUMN_NAME = t.COLUMN_NAME
+            WHERE t.OWNER = :owner AND t.TABLE_NAME = :table_name
+              AND t.COLUMN_ID IS NOT NULL
+              AND t.HIDDEN_COLUMN = 'NO'
+            ORDER BY t.COLUMN_ID
             """,
             owner=schema,
             table_name=table,
@@ -99,6 +114,9 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
                 data_scale=row[5],
                 char_length=row[6],
                 char_used=row[7],
+                data_type_owner=row[8],
+                hidden=row[9] == "YES",
+                comment=row[10],
             )
             for row in cursor.fetchall()
         )
@@ -107,19 +125,44 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
 
         cursor.execute(
             """
-            SELECT NUM_ROWS, AVG_ROW_LEN
-            FROM ALL_TABLES
-            WHERE OWNER = :owner AND TABLE_NAME = :table_name
+            SELECT t.NUM_ROWS, t.AVG_ROW_LEN, t.IOT_TYPE, t.TEMPORARY,
+                   c.COMMENTS
+            FROM ALL_TABLES t
+            LEFT JOIN ALL_TAB_COMMENTS c
+                ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME
+            WHERE t.OWNER = :owner AND t.TABLE_NAME = :table_name
             """,
             owner=schema,
             table_name=table,
         )
         table_stats = cursor.fetchone()
         row_count = None
-        if table_stats and table_stats[0] is not None:
-            row_count = int(table_stats[0])
-            if (estimated_bytes is None or estimated_bytes == 0) and table_stats[1] is not None:
-                estimated_bytes = row_count * int(table_stats[1])
+        table_comment: str | None = None
+        is_temporary = False
+        if table_stats:
+            if table_stats[0] is not None:
+                row_count = int(table_stats[0])
+                if (estimated_bytes is None or estimated_bytes == 0) and table_stats[1] is not None:
+                    estimated_bytes = row_count * int(table_stats[1])
+            is_temporary = (table_stats[3] or "N") == "Y"
+            table_comment = table_stats[4]
+
+        # External tables aren't in ALL_TABLES; check ALL_EXTERNAL_TABLES.
+        cursor.execute(
+            """
+            SELECT 1 FROM ALL_EXTERNAL_TABLES
+            WHERE OWNER = :owner AND TABLE_NAME = :table_name
+            """,
+            owner=schema,
+            table_name=table,
+        )
+        is_external = cursor.fetchone() is not None
+        if is_external:
+            table_type = "EXTERNAL"
+        elif is_temporary:
+            table_type = "GTT"
+        else:
+            table_type = "TABLE"
 
         cursor.execute(
             """
@@ -180,4 +223,6 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
         partitions=partitions,
         primary_key=primary_key,
         unique_keys=tuple(tuple(value) for value in unique_by_name.values()),
+        table_type=table_type,
+        comment=table_comment,
     )

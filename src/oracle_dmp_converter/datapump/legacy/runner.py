@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from oracle_dmp_converter.datapump._base_runner import _BaseRunner
+from oracle_dmp_converter.datapump._exit_policy import LEGACY_IMP_POLICY
 from oracle_dmp_converter.datapump.legacy.parfile import (
     LegacyImportJob,
     LegacyIndexFileJob,
@@ -16,15 +17,22 @@ LOGGER = logging.getLogger(__name__)
 
 
 class LegacyRunner(_BaseRunner):
-    """Executes legacy Oracle imp/exp jobs inside a Docker container."""
+    """Executes legacy Oracle imp/exp jobs inside a Docker container.
+
+    Legacy ``imp`` returns ``2`` for completed-with-warnings.  We pass
+    :data:`LEGACY_IMP_POLICY` so that exit code is *logged* as a warning
+    but does not raise unless the output also contains a fatal ORA code
+    (e.g. ``ORA-39126``, ``ORA-31693``).
+    """
 
     def run_imp(self, job: LegacyImportJob) -> str:
-        """Run a legacy ``imp`` import job.
-
-        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
-        exit, preserving the full combined stdout+stderr as the message.
-        """
-        return self._run_tool(["imp"], render_legacy_import_parfile(job), "imp")
+        """Run a legacy ``imp`` import job."""
+        return self._run_tool(
+            ["imp"],
+            render_legacy_import_parfile(job),
+            "imp",
+            policy=LEGACY_IMP_POLICY,
+        )
 
     def run_imp_indexfile(self, job: LegacyIndexFileJob) -> tuple[str, str]:
         """Run ``imp INDEXFILE=`` to discover tables in a legacy dump.
@@ -35,12 +43,13 @@ class LegacyRunner(_BaseRunner):
 
         Returns a ``(sql_content, log_output)`` tuple.  *sql_content* is the
         indexfile DDL text (empty string if the file cannot be read).
-        *log_output* is the combined stdout+stderr from the ``imp`` process.
-
-        Raises :class:`~oracle_dmp_converter.errors.DataPumpError` on non-zero
-        exit from ``imp``.
         """
-        log_output = self._run_tool(["imp"], render_legacy_indexfile_parfile(job), "imp-indexfile")
+        log_output = self._run_tool(
+            ["imp"],
+            render_legacy_indexfile_parfile(job),
+            "imp-indexfile",
+            policy=LEGACY_IMP_POLICY,
+        )
 
         cat_result = self.container.exec(["cat", job.indexfile], check=False)
         sql_content = cat_result.stdout if cat_result.returncode == 0 else ""

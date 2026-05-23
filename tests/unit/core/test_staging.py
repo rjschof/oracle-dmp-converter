@@ -10,6 +10,7 @@ import oracledb
 from oracle_dmp_converter.core.staging import (
     apply_byte_to_char,
     dematerialize_mviews,
+    disable_foreign_keys,
     disable_triggers,
     drop_vpd_policies,
 )
@@ -279,3 +280,55 @@ class TestApplyByteToChar:
 
         count = apply_byte_to_char(conn, "MYSCHEMA")
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# disable_foreign_keys
+# ---------------------------------------------------------------------------
+
+
+class TestDisableForeignKeys:
+    def test_disables_each_constraint(self) -> None:
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "FK_ORDERS_CUSTOMER"), ("LINES", "FK_LINES_ORDERS")]
+        )
+        action_cursor_a = _make_cursor()
+        action_cursor_b = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, action_cursor_a, action_cursor_b]
+
+        count = disable_foreign_keys(conn, "DMP_HR")
+        assert count == 2
+        action_cursor_a.execute.assert_called_once()
+        action_cursor_b.execute.assert_called_once()
+        # Statements should reference the schema and constraint name
+        sql_a = action_cursor_a.execute.call_args[0][0]
+        assert "DMP_HR" in sql_a
+        assert "FK_ORDERS_CUSTOMER" in sql_a
+        assert "DISABLE CONSTRAINT" in sql_a
+
+    def test_no_constraints_returns_zero(self) -> None:
+        conn = _make_conn(fetchall_values=[[]])
+        count = disable_foreign_keys(conn, "EMPTY")
+        assert count == 0
+
+    def test_missing_constraint_is_skipped_silently(self) -> None:
+        # ORA-02430/2431 means the constraint doesn't exist anymore; not fatal.
+        discovery_cursor = _make_cursor([("T", "FK_GONE")])
+        action_cursor = _make_cursor()
+        action_cursor.execute.side_effect = _make_ora_error(2431)
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, action_cursor]
+        count = disable_foreign_keys(conn, "S")
+        assert count == 0
+
+    def test_other_oracle_error_logged_and_continues(self) -> None:
+        # Two constraints: first errors with non-skip code, second succeeds.
+        discovery_cursor = _make_cursor([("T1", "FK1"), ("T2", "FK2")])
+        bad_cursor = _make_cursor()
+        bad_cursor.execute.side_effect = _make_ora_error(1)
+        good_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, bad_cursor, good_cursor]
+        count = disable_foreign_keys(conn, "S")
+        assert count == 1  # only the second succeeded

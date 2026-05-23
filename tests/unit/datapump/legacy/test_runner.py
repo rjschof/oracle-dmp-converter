@@ -54,7 +54,9 @@ class TestLegacyRunner:
         imp_result.stderr = ""
 
         container = MagicMock()
-        container.exec.side_effect = [imp_result, cat_result]
+        # imp, rm -f parfile cleanup, cat indexfile
+        rm_result = MagicMock(returncode=0, stdout="", stderr="")
+        container.exec.side_effect = [imp_result, rm_result, cat_result]
 
         runner = LegacyRunner(container, tmp_path)
         job = LegacyIndexFileJob(
@@ -80,7 +82,9 @@ class TestLegacyRunner:
         cat_result.stderr = "No such file"
 
         container = MagicMock()
-        container.exec.side_effect = [imp_result, cat_result]
+        # imp, rm -f parfile cleanup, cat indexfile
+        rm_result = MagicMock(returncode=0, stdout="", stderr="")
+        container.exec.side_effect = [imp_result, rm_result, cat_result]
 
         runner = LegacyRunner(container, tmp_path)
         job = LegacyIndexFileJob(

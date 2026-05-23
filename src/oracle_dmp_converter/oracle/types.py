@@ -18,12 +18,29 @@ STRINGIFIED_TYPES = {
     "ANYDATA",
     "INTERVAL DAY TO SECOND",
     "INTERVAL YEAR TO MONTH",
+    "JSON",
     "SDO_GEOMETRY",
     "TIMESTAMP WITH LOCAL TIME ZONE",
     "TIMESTAMP WITH TIME ZONE",
     "UROWID",
     "XMLTYPE",
 }
+
+# Types the converter cannot extract meaningful data for via a normal
+# SELECT.  Tables containing these columns are marked UNSUPPORTED by the
+# planner so they surface in the conversion report rather than producing
+# garbage parquet.
+UNSUPPORTED_COLUMN_TYPES = frozenset({"BFILE"})
+
+# Heuristic detection: any normalized type the converter doesn't recognise
+# AND that comes from a user-defined OBJECT / VARRAY / nested-table type
+# is also UNSUPPORTED (e.g. ``ADDRESS_T``, ``TAG_LIST``).  Those are
+# detected by ``planner.py`` via the column's ``data_type_owner`` field.
+
+# Oracle's maximum NUMBER precision; used as a safe default when a column is
+# declared as ``NUMBER`` (unbounded) or ``NUMBER(*,0)`` and the converter
+# would otherwise silently drop to ``double`` (loses precision past 2^53).
+_NUMBER_MAX_PRECISION = 38
 
 
 def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
@@ -57,14 +74,22 @@ def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | Non
         return override.parquet_type
     data_type = column.normalized_type
     if data_type == "NUMBER":
-        if (
-            column.data_scale == 0
-            and column.data_precision is not None
-            and column.data_precision <= 18
-        ):
+        precision = column.data_precision
+        scale = column.data_scale
+        if scale == 0 and precision is not None and precision <= 18:
             return "int64"
-        if column.data_precision is not None and column.data_precision <= 38:
-            return f"decimal128({column.data_precision},{column.data_scale or 0})"
+        if precision is not None and precision <= _NUMBER_MAX_PRECISION:
+            return f"decimal128({precision},{scale or 0})"
+        # ``NUMBER`` (unbounded) and ``NUMBER(*,0)`` both report
+        # ``data_precision IS NULL`` from ALL_TAB_COLUMNS.  Falling through
+        # to ``double`` here silently loses precision for integers past
+        # 2^53.  Default to the widest fixed-precision decimal Oracle
+        # supports so values round-trip with full fidelity; the column
+        # can still be overridden to ``double`` via per-column config.
+        if precision is None:
+            if scale is None or scale == 0:
+                return f"decimal128({_NUMBER_MAX_PRECISION},0)"
+            return f"decimal128({_NUMBER_MAX_PRECISION},{scale})"
         return "double"
     if data_type in FLOAT_TYPES:
         return "double"
@@ -80,6 +105,24 @@ def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | Non
         column.name,
     )
     return "string"
+
+
+_TYPE_SPECIFIC_EXPRESSIONS: dict[str, str] = {
+    # XMLTYPE: TO_CHAR(xmltype) raises ORA-00932 against binary-storage
+    # XMLTYPE columns in modern Oracle.  XMLSERIALIZE is the supported
+    # conversion in 12c+ and works for both text- and binary-storage
+    # XMLTYPE columns.
+    "XMLTYPE": "XMLSERIALIZE(DOCUMENT {column} AS CLOB)",
+    # SDO_GEOMETRY: TO_CHAR doesn't produce useful text for spatial
+    # objects.  SDO_UTIL.TO_WKTGEOMETRY emits Well-Known Text which
+    # round-trips through the converter as a string column.
+    "SDO_GEOMETRY": "SDO_UTIL.TO_WKTGEOMETRY({column})",
+    # Native JSON (Oracle 21c+): TO_CHAR works for VARCHAR2 IS JSON
+    # storage but raises ORA-00932 against the binary-OSON storage used
+    # by the native ``JSON`` type.  JSON_SERIALIZE renders the value to
+    # text and works for both storages.
+    "JSON": "JSON_SERIALIZE({column} RETURNING CLOB)",
+}
 
 
 def export_expression(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
@@ -105,6 +148,9 @@ def export_expression(column: ColumnMetadata, override: ColumnOverride | None = 
     column_ref = oracle_identifier(column.name)
     if override and override.expression:
         return override.expression.replace("{column}", column_ref)
+    type_template = _TYPE_SPECIFIC_EXPRESSIONS.get(column.normalized_type)
+    if type_template is not None:
+        return type_template.replace("{column}", column_ref)
     if column.normalized_type in STRINGIFIED_TYPES:
         return f"TO_CHAR({column_ref})"
     return column_ref

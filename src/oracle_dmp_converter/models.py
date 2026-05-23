@@ -83,6 +83,25 @@ class ColumnMetadata:
     data_scale: int | None = None
     char_length: int | None = None
     char_used: str | None = None
+    data_type_owner: str | None = None
+    """Schema that owns the user-defined type referenced by ``data_type``.
+
+    Populated for object-type, VARRAY, and nested-table columns (e.g.
+    ``("FINANCE", "ADDRESS_T")``).  ``None`` for built-in scalar types.
+    The planner uses this to flag user-defined-type columns as
+    UNSUPPORTED since the converter cannot meaningfully serialise them.
+    """
+    hidden: bool = False
+    """Whether the column has ``HIDDEN_COLUMN='YES'`` in ALL_TAB_COLS.
+
+    Virtual columns and partitioning-helper columns are reported as
+    hidden by Oracle; they are excluded from converter output.
+    """
+    comment: str | None = None
+    """Free-form column comment from ``ALL_COL_COMMENTS``, propagated
+    into the Arrow/Parquet field metadata so downstream consumers can
+    see what each column means.
+    """
 
     @property
     def normalized_type(self) -> str:
@@ -140,6 +159,13 @@ class TableMetadata:
     partitions: tuple[PartitionMetadata, ...] = ()
     primary_key: tuple[str, ...] = ()
     unique_keys: tuple[tuple[str, ...], ...] = ()
+    table_type: str = "TABLE"
+    """``"TABLE"`` for ordinary heap / IOT / partitioned tables;
+    ``"EXTERNAL"`` for external tables; ``"GTT"`` for global temporary
+    tables.  The planner uses this to mark non-data-bearing tables as
+    UNSUPPORTED so they don't produce empty / broken parquet output."""
+    comment: str | None = None
+    """Free-form table comment from ``ALL_TAB_COMMENTS``."""
 
     @property
     def qualified_name(self) -> str:
@@ -298,6 +324,11 @@ class ContainerSession:
     metadata_imported: bool = False
     metadata_import_time: str = ""
     prepared_schemas: frozenset[str] = field(default_factory=frozenset)
+    fingerprint: str = ""
+    """SHA-256 of ``(oracle_image, container_runtime, container_name, sorted
+    prepared_schemas)``. Compared on session reuse to detect a session that
+    points at a restarted or recreated container. Empty for sessions written
+    by older versions of the tool — treated as ``unverified``."""
 
 
 @dataclass(frozen=True)

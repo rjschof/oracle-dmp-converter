@@ -5,6 +5,8 @@ Oracle container.  Format-specific branching (modern Data Pump vs legacy
 exp/imp) is delegated to :class:`DumpWorkflow`.
 """
 
+# pylint: disable=too-many-lines  # single coherent driver; splitting hurts readability.
+
 from __future__ import annotations
 
 import logging
@@ -23,6 +25,7 @@ from oracle_dmp_converter.core.results import (
 from oracle_dmp_converter.core.staging import (
     apply_byte_to_char,
     dematerialize_mviews,
+    disable_foreign_keys,
     disable_triggers,
     drop_vpd_policies,
 )
@@ -314,12 +317,19 @@ class StagingExecutor:
 
     def prepare_stage_schema(self, source_schema: str) -> None:
         stage_schema = self._stage_schema_for(source_schema)
+        if stage_schema in self._prepared_schemas:
+            # Already prepared by an earlier batch in this run (or restored
+            # from session.json on reconnect).  Skip the redundant
+            # CREATE USER + CREATE TABLESPACE + GRANT QUOTA round-trips
+            # and the noisy logs they produce.
+            return
         LOGGER.info("Ensuring staging schema %s for source %s", stage_schema, source_schema)
         with self._connect() as conn:
             ensure_schema(conn, stage_schema, self.stage_password)
             for tablespace in self._required_tablespaces():
-                ensure_tablespace(conn, tablespace)
-                self._created_tablespaces.add(tablespace)
+                if tablespace not in self._created_tablespaces:
+                    ensure_tablespace(conn, tablespace)
+                    self._created_tablespaces.add(tablespace)
                 grant_quota_unlimited(conn, stage_schema, tablespace)
         self._prepared_schemas.add(stage_schema)
 
@@ -329,34 +339,39 @@ class StagingExecutor:
         with self._connect() as conn:
             drop_schema(conn, stage_schema)
 
-    def validate_staging_tables(self, table_plans: list[TablePlan]) -> None:
-        """Validate that staging tables imported during inspect still exist.
+    def validate_staging_tables(self, table_plans: list[TablePlan]) -> list[TablePlan]:
+        """Filter *table_plans* down to those with present staging tables.
 
         Should be called before convert when the workflow was already
-        initialised from a prior :meth:`inspect_dump` call.  Raises
-        :exc:`ValueError` with a helpful message if any staging table is
-        missing so the caller knows to re-run inspect rather than seeing a
-        cryptic Oracle error mid-conversion.
+        initialised from a prior :meth:`inspect_dump` call.  Tables whose
+        staging counterpart no longer exists (because the metadata import
+        skipped them — common when a legacy ``exp`` dump fails to
+        serialise IDENTITY / JSON / object-type columns) are dropped from
+        the returned list and logged at WARNING.
 
-        Args:
-            table_plans: Supported (non-UNSUPPORTED) table plans whose
-                staging tables should be present.
-
-        Raises:
-            ValueError: If one or more staging tables are absent.
+        Returns:
+            The subset of *table_plans* whose staging tables still exist.
+            Missing tables are filtered out rather than treated as fatal,
+            so a partial dump still produces partial output.
         """
+        present: list[TablePlan] = []
         missing: list[str] = []
         with self._connect() as conn:
             for tp in table_plans:
                 stage_schema = self._stage_schema_for(tp.schema)
-                if not table_exists(conn, stage_schema, tp.table):
+                if table_exists(conn, stage_schema, tp.table):
+                    present.append(tp)
+                else:
                     missing.append(f"{stage_schema}.{tp.table}")
         if missing:
-            raise ValueError(
-                "Staging tables from the inspect phase are missing: "
-                + ", ".join(missing)
-                + ". Re-run inspect before convert."
+            LOGGER.warning(
+                "Skipping %d staging table(s) absent from the container "
+                "(typically because the source dump's metadata for them was "
+                "incomplete): %s",
+                len(missing),
+                ", ".join(missing),
             )
+        return present
 
     def _apply_staging_fixups(self, source_schema: str) -> None:
         """Run all post-import staging fixups in a single connection."""
@@ -364,6 +379,7 @@ class StagingExecutor:
         with self._connect() as conn:
             dematerialize_mviews(conn, stage_schema)
             disable_triggers(conn, stage_schema)
+            disable_foreign_keys(conn, stage_schema)
             drop_vpd_policies(conn, stage_schema)
             apply_byte_to_char(conn, stage_schema)
 
@@ -481,16 +497,27 @@ class StagingExecutor:
                     continue
                 if not table_exists(conn, stage_schema, tp.table):
                     missing_tables.append(f"{stage_schema}.{tp.table}")
-        if missing_users or missing_tables:
-            details: list[str] = []
-            if missing_users:
-                details.append("missing staging users: " + ", ".join(sorted(missing_users)))
-            if missing_tables:
-                details.append("missing staging tables: " + ", ".join(missing_tables))
+        if missing_users:
+            # Missing staging *users* really do indicate stale state — the
+            # container was likely restarted between inspect and convert.
             raise ValueError(
-                "Container state does not match inspect manifest ("
-                + "; ".join(details)
+                "Container state does not match inspect manifest "
+                "(missing staging users: "
+                + ", ".join(sorted(missing_users))
                 + "). Re-run inspect before convert."
+            )
+        if missing_tables:
+            # Missing staging *tables* (with the users present) usually
+            # means the source dump's metadata import skipped them, which
+            # is expected for legacy ``exp`` dumps that couldn't serialise
+            # IDENTITY / JSON / object-type columns.  Log and continue —
+            # the per-table validation later in convert_plan filters them
+            # out of the conversion plan.
+            LOGGER.warning(
+                "Container is missing %d staging table(s) recorded in the "
+                "manifest; these will be skipped during convert: %s",
+                len(missing_tables),
+                ", ".join(missing_tables),
             )
 
     def _import_chunk_with_recovery(
@@ -761,6 +788,152 @@ class StagingExecutor:
                     truncate_table(conn, stage_schema, tp.table)
                     truncated.add(key)
 
+    def _clear_modern_stage_tables_for_plan(
+        self,
+        supported: list[TablePlan],
+        state_store: StateStore | None,
+    ) -> None:
+        """Pre-clear every staging table with at least one pending chunk.
+
+        Unlike :meth:`_clear_modern_stage_tables` (which works one batch
+        at a time), this walks the full ``supported`` plan and decides
+        which tables to clear based on the entire set of pending chunks
+        across all batches.  This avoids ORA-02292 deadlock cases where
+        a reference-partitioned parent table sits in batch N and its
+        child sits in batch N+1: clearing the parent first would fail
+        because the child still has rows, and the per-batch
+        implementation never gets to delete the child.
+        """
+        if not supported:
+            return
+        targets: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for tp in supported:
+            if not self._table_has_pending_chunks(tp, state_store):
+                continue
+            key = (self._stage_schema_for(tp.schema), tp.table)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(key)
+        if not targets:
+            return
+        self._delete_from_staging_tables(targets)
+
+    def _table_has_pending_chunks(
+        self,
+        tp: TablePlan,
+        state_store: StateStore | None,
+    ) -> bool:
+        """Return True if any chunk on *tp* is not already ``completed``."""
+        if state_store is None:
+            return True
+        for chunk in tp.chunks:
+            existing = state_store.get(tp.qualified_name, chunk.name)
+            if existing is None or existing.status != "completed":
+                return True
+        return False
+
+    def _clear_modern_stage_tables(
+        self,
+        pending: list[tuple[TablePlan, ChunkPlan]],
+    ) -> None:
+        """Clear staging-table rows before a modern impdp APPEND batch.
+
+        Modern Data Pump imports use ``TABLE_EXISTS_ACTION=APPEND`` to
+        avoid ``ORA-39120`` against reference-partitioned children whose
+        FK can't be disabled.  APPEND is correct for the happy path
+        (inspect → convert against an empty staging schema), but on a
+        re-run — e.g. a test invoking convert multiple times — APPEND
+        would stack data on top of itself and eventually exhaust the
+        container's resources.
+
+        We pre-DELETE rows from every unique staging table in *pending*,
+        ignoring ``ORA-02292`` (child record found) so a reference-
+        partitioned parent whose child hasn't been DELETE'd yet just
+        gets retried after the child.  Two passes are enough to cover
+        any realistic FK graph in the audit fixture.
+        """
+        seen: set[tuple[str, str]] = set()
+        targets: list[tuple[str, str]] = []
+        for tp, _ in pending:
+            key = (self._stage_schema_for(tp.schema), tp.table)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(key)
+        if targets:
+            self._delete_from_staging_tables(targets)
+
+    def _delete_from_staging_tables(self, targets: list[tuple[str, str]]) -> None:
+        """Run ``DELETE FROM`` against *targets* with FK-aware retries.
+
+        Each (stage_schema, table) pair gets a ``DELETE FROM`` statement.
+        When DELETE fails with ORA-02292 (child record found), the table
+        is deferred to the next pass — the child must be DELETE'd first.
+        Up to 3 passes are run, which handles arbitrary linear FK chains
+        of length <=3.  Each successful DELETE is committed individually
+        so an FK violation later doesn't roll the deletes back.
+        """
+        LOGGER.info("Pre-clearing %d staging table(s) before APPEND batch", len(targets))
+        with self._connect() as conn:
+            for pass_num in range(1, 4):
+                remaining: list[tuple[str, str]] = []
+                deleted_this_pass = 0
+                for stage_schema, table in targets:
+                    try:
+                        with conn.cursor() as cursor:
+                            cursor.execute(f'DELETE FROM "{stage_schema}"."{table}"')
+                            row_count = cursor.rowcount
+                        conn.commit()
+                        deleted_this_pass += 1
+                        LOGGER.debug(
+                            "Pre-cleared %s.%s (%d rows)",
+                            stage_schema,
+                            table,
+                            row_count,
+                        )
+                    except oracledb.DatabaseError as exc:
+                        conn.rollback()
+                        code = exc.args[0].code if exc.args else None
+                        # ORA-02292: child record found — retry next pass.
+                        # ORA-00942: table doesn't exist; ignore.
+                        # ORA-14452: cannot delete from external table.
+                        if code == 2292:
+                            remaining.append((stage_schema, table))
+                            continue
+                        if code in (942, 14452):
+                            LOGGER.debug(
+                                "Skipping pre-clear of %s.%s: ORA-%05d",
+                                stage_schema,
+                                table,
+                                code or 0,
+                            )
+                            continue
+                        LOGGER.warning(
+                            "Pre-clear of %s.%s failed: %s",
+                            stage_schema,
+                            table,
+                            exc,
+                        )
+                LOGGER.info(
+                    "Pre-clear pass %d: cleared=%d, deferred=%d",
+                    pass_num,
+                    deleted_this_pass,
+                    len(remaining),
+                )
+                if not remaining:
+                    break
+                targets = remaining
+            else:
+                # Three passes exhausted with rows still present.  Some
+                # FK chains are deeper than 3 levels, or a row is
+                # referenced via a constraint that can never be cleared.
+                LOGGER.warning(
+                    "Pre-clear gave up after 3 passes; tables still holding rows: %s",
+                    ", ".join(f"{s}.{t}" for s, t in remaining),
+                )
+
     def _mark_pending_failed(
         self,
         pending: list[tuple[TablePlan, ChunkPlan]],
@@ -842,6 +1015,9 @@ class StagingExecutor:
         workflow = self._require_workflow()
         if workflow.dump_format == DumpFormat.LEGACY:
             self._truncate_legacy_stage_tables(pending)
+        # Modern dumps: pre-clear was already done cross-batch in
+        # convert_plan to handle reference-partition FK chains; nothing
+        # to do here.
 
         import_specs: list[tuple[str, str, str, str, str | None]] = [
             (
@@ -861,8 +1037,22 @@ class StagingExecutor:
             raise
 
         for tp, chunk in pending:
-            result = self._export_one_batched_chunk(tp, chunk, output_dir, state_store)
-            chunk_results[tp.qualified_name].append(result)
+            try:
+                result = self._export_one_batched_chunk(tp, chunk, output_dir, state_store)
+                chunk_results[tp.qualified_name].append(result)
+            except Exception as exc:  # noqa: BLE001
+                # A per-chunk failure (bad type, ORA-00932 on an exotic
+                # column, FK violation on a reference-partitioned import)
+                # is recorded in state by ``_export_one_batched_chunk`` but
+                # must NOT abort the whole batch — other tables in the
+                # batch are independent and should still be exported.  The
+                # failure is reflected later in the conversion report.
+                LOGGER.warning(
+                    "Chunk export failed for %s %s: %s; continuing with rest of batch",
+                    tp.qualified_name,
+                    chunk.name,
+                    exc,
+                )
 
         return [
             TableConversionResult(
@@ -896,7 +1086,15 @@ class StagingExecutor:
                 supported.append(table_plan)
 
         if workflow_from_inspect:
-            self.validate_staging_tables(supported)
+            supported = self.validate_staging_tables(supported)
+
+        # Pre-clear all supported staging tables that have at least one
+        # pending chunk.  Doing this once, cross-batch, handles
+        # reference-partitioned FK chains where the parent is in batch N
+        # and the child is in batch N+1 — clearing the parent first
+        # would fail (ORA-02292) because the child still has rows.
+        if self._workflow and self._workflow.dump_format != DumpFormat.LEGACY:
+            self._clear_modern_stage_tables_for_plan(supported, state_store)
 
         plan_started_at = datetime.now(UTC)
         results: list[TableConversionResult] = []

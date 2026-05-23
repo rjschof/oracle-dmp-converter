@@ -48,11 +48,49 @@ from oracle_dmp_converter.runtime.session import (
     cleanup_stale_session,
     load_session_if_exists,
     session_path_for,
+    verify_session_fingerprint,
     write_session,
 )
 from oracle_dmp_converter.settings import ConverterSettings
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _safe_stop_container(
+    container: ContainerOracle,
+    *,
+    reason: str,
+    reraise: bool = False,
+) -> None:
+    """Stop *container* with narrow error handling and structured logging.
+
+    Replaces a previous bare ``except Exception: pass`` that could silently
+    leak Docker containers on failure paths.  Errors are logged at WARNING
+    with the container id + name so they're visible in CI logs.
+
+    Args:
+        container: Running :class:`ContainerOracle` to stop.
+        reason: Short phrase describing why ``stop()`` is being called
+            (``"normal shutdown"``, ``"start failure"``, ...).  Included
+            in the log line for traceability.
+        reraise: When ``True``, any underlying error from
+            :meth:`ContainerOracle.stop` is re-raised after logging.  Used
+            on the normal shutdown path so an unexpected Docker error is
+            surfaced to the caller; left ``False`` on best-effort cleanup
+            paths (e.g. unwinding from a failed start) where the original
+            exception is more important than this secondary failure.
+    """
+    try:
+        container.stop()
+    except Exception as exc:  # noqa: BLE001 — docker client wraps errors
+        LOGGER.warning(
+            "Container stop failed (reason=%s, container=%s): %s",
+            reason,
+            container.name,
+            exc,
+        )
+        if reraise:
+            raise
 
 
 class OracleDMPConverter:
@@ -109,14 +147,35 @@ class OracleDMPConverter:
             if self._session_existed_at_start:
                 session = load_session_if_exists(session_path)
                 if session is not None:
-                    self._executor.metadata_imported = session.metadata_imported
-                    # pylint: disable-next=protected-access
-                    self._executor._prepared_schemas = set(session.prepared_schemas)  # noqa: SLF001
+                    ok, reason = verify_session_fingerprint(
+                        session,
+                        container_name=container.name,
+                        container_runtime=self.settings.container_runtime,
+                        oracle_image=self.settings.oracle_image,
+                        prepared_schemas=session.prepared_schemas,
+                    )
+                    if not ok:
+                        LOGGER.warning(
+                            "Stale session detected for %s: %s. "
+                            "Treating staging state as empty and re-importing.",
+                            session_path,
+                            reason,
+                        )
+                        self._executor.metadata_imported = False
+                    else:
+                        if reason.startswith("unverified"):
+                            LOGGER.info(
+                                "Session %s %s; reusing recorded state.",
+                                session_path,
+                                reason,
+                            )
+                        self._executor.metadata_imported = session.metadata_imported
+                        # pylint: disable-next=protected-access
+                        self._executor._prepared_schemas = set(session.prepared_schemas)  # noqa: SLF001
         except Exception:
-            try:
-                container.stop()
-            except Exception:  # noqa: BLE001
-                LOGGER.debug("Best-effort container stop after start failure failed")
+            _safe_stop_container(container, reason="start failure")
+            self._container = None
+            self._executor = None
             raise
 
     def stop(self) -> None:
@@ -148,7 +207,7 @@ class OracleDMPConverter:
                     session_path,
                 )
             else:
-                container.stop()
+                _safe_stop_container(container, reason="normal shutdown", reraise=True)
                 if session_path.exists():
                     session_path.unlink()
                     LOGGER.debug("Deleted session file %s", session_path)

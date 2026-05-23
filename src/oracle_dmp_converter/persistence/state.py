@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,18 +56,25 @@ class StateStore:
     Can be used as a context manager; :meth:`close` is called on exit.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, sidecar: bool = True) -> None:
         """Open (or create) the SQLite database at *path*.
 
         Creates the ``chunks`` table if it does not exist and runs any pending
-        migrations.
+        migrations.  When *sidecar* is True (the default), every successful
+        ``COMPLETED`` upsert also writes a small ``<chunk>.rowcount`` JSON
+        sidecar in the same directory as the SQLite file, so a corrupted
+        database can be reconciled by replaying the sidecar files.
 
         Args:
             path: Filesystem path for the SQLite database file.  Parent
                 directories are created as needed.
+            sidecar: Whether to emit per-chunk rowcount sidecar files.
+                Disable in tests that don't need them; the converter
+                default is enabled.
         """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.sidecar = sidecar
         self.conn = sqlite3.connect(path)
         self._migrate()
         self.conn.execute(
@@ -122,7 +132,10 @@ class StateStore:
 
         Uses ``INSERT … ON CONFLICT … DO UPDATE`` so that repeated calls for
         the same ``(table_name, chunk_name)`` pair replace the previous row.
-        Changes are committed immediately.
+        Changes are committed immediately.  On a ``completed`` transition
+        with non-null row counts, also writes a JSON sidecar file so the
+        run can be reconciled if the SQLite file is later corrupted or
+        truncated.
 
         Args:
             state: The chunk state to persist.
@@ -147,6 +160,107 @@ class StateStore:
             ),
         )
         self.conn.commit()
+        if self.sidecar and state.status == "completed":
+            self._write_sidecar(state)
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Yield the underlying connection inside a SQLite transaction.
+
+        Commits on clean exit; rolls back on exception so a mid-write
+        crash cannot leave the database half-updated.  The default
+        :meth:`upsert` API does not need this — it is provided for callers
+        that need to write multiple rows atomically (e.g. bulk
+        reconciliation from sidecar files).
+        """
+        try:
+            yield self.conn
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _sidecar_path(self, table_name: str, chunk_name: str) -> Path:
+        """Return the on-disk sidecar path for a specific chunk."""
+        sidecar_dir = self.path.parent / "sidecars"
+        safe_table = table_name.replace("/", "_")
+        safe_chunk = chunk_name.replace("/", "_")
+        return sidecar_dir / f"{safe_table}__{safe_chunk}.rowcount"
+
+    def _write_sidecar(self, state: ChunkState) -> None:
+        """Write ``<chunks-dir>/sidecars/<table>__<chunk>.rowcount`` atomically.
+
+        The file is written via a temp + rename so a partial write cannot
+        leave behind an unreadable sidecar.  Failures here are logged at
+        WARNING and never raised — the SQLite write has already succeeded,
+        and the sidecar is only a belt-and-braces reconciliation aid.
+        """
+        path = self._sidecar_path(state.table_name, state.chunk_name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            payload = {
+                "table_name": state.table_name,
+                "chunk_name": state.chunk_name,
+                "status": state.status,
+                "imported_rows": state.imported_rows,
+                "output_rows": state.output_rows,
+            }
+            tmp.write_text(json.dumps(payload, sort_keys=True) + "\n")
+            tmp.replace(path)
+        except OSError as exc:
+            LOGGER.warning(
+                "Failed to write rowcount sidecar for %s.%s: %s",
+                state.table_name,
+                state.chunk_name,
+                exc,
+            )
+
+    def reconcile_from_sidecars(self) -> int:
+        """Re-import completed-chunk records from sidecar files.
+
+        Walks the sidecar directory and inserts a ``completed`` row into
+        the ``chunks`` table for any chunk that has a sidecar but no
+        matching row.  Used to recover from a corrupted ``state.sqlite``.
+
+        Returns:
+            The number of records reconciled.
+        """
+        sidecar_dir = self.path.parent / "sidecars"
+        if not sidecar_dir.exists():
+            return 0
+        recovered = 0
+        with self.transaction() as conn:
+            for sidecar_path in sidecar_dir.glob("*.rowcount"):
+                try:
+                    data = json.loads(sidecar_path.read_text())
+                except (OSError, json.JSONDecodeError) as exc:
+                    LOGGER.warning("Skipping malformed sidecar %s: %s", sidecar_path, exc)
+                    continue
+                existing = conn.execute(
+                    "SELECT 1 FROM chunks WHERE table_name = ? AND chunk_name = ?",
+                    (data["table_name"], data["chunk_name"]),
+                ).fetchone()
+                if existing is not None:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO chunks(table_name, chunk_name, status,
+                                       imported_rows, output_rows, error)
+                    VALUES (?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        data["table_name"],
+                        data["chunk_name"],
+                        data.get("status", "completed"),
+                        data.get("imported_rows"),
+                        data.get("output_rows"),
+                    ),
+                )
+                recovered += 1
+        if recovered:
+            LOGGER.info("Reconciled %d chunks from sidecar files", recovered)
+        return recovered
 
     def get(self, table_name: str, chunk_name: str) -> ChunkState | None:
         """Retrieve the stored state for a specific chunk.

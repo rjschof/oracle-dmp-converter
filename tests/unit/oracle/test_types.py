@@ -1,6 +1,10 @@
 from oracle_dmp_converter.config import ColumnOverride
 from oracle_dmp_converter.models import ColumnMetadata
-from oracle_dmp_converter.oracle.types import export_expression, oracle_to_arrow_token
+from oracle_dmp_converter.oracle.types import (
+    UNSUPPORTED_COLUMN_TYPES,
+    export_expression,
+    oracle_to_arrow_token,
+)
 
 
 def col(data_type: str, precision: int | None = None, scale: int | None = None) -> ColumnMetadata:
@@ -21,14 +25,49 @@ def test_large_number_maps_to_decimal() -> None:
     assert oracle_to_arrow_token(col("NUMBER", 30, 4)) == "decimal128(30,4)"
 
 
-def test_unconstrained_number_maps_to_double() -> None:
-    assert oracle_to_arrow_token(col("NUMBER")) == "double"
+def test_unconstrained_number_maps_to_max_precision_decimal() -> None:
+    """``NUMBER`` (no precision/scale) must not silently truncate to double.
+
+    Falling through to ``double`` loses precision for integers past 2^53.
+    Map to the widest decimal128 Oracle supports so large values like
+    ``NUMBER(*,0)`` columns round-trip with full fidelity.
+    """
+    assert oracle_to_arrow_token(col("NUMBER")) == "decimal128(38,0)"
+
+
+def test_number_star_zero_maps_to_max_precision_decimal() -> None:
+    """``NUMBER(*,0)`` reports ``data_precision=None`` and ``data_scale=0``."""
+    assert oracle_to_arrow_token(col("NUMBER", None, 0)) == "decimal128(38,0)"
+
+
+def test_unbounded_number_with_scale_keeps_scale() -> None:
+    """``NUMBER`` columns with a declared scale but no precision keep the scale."""
+    assert oracle_to_arrow_token(col("NUMBER", None, 4)) == "decimal128(38,4)"
+
+
+def test_json_uses_json_serialize() -> None:
+    column = col("JSON")
+    assert oracle_to_arrow_token(column) == "string"
+    assert export_expression(column) == "JSON_SERIALIZE(C1 RETURNING CLOB)"
+
+
+def test_sdo_geometry_uses_wkt_helper() -> None:
+    column = col("SDO_GEOMETRY")
+    assert oracle_to_arrow_token(column) == "string"
+    assert export_expression(column) == "SDO_UTIL.TO_WKTGEOMETRY(C1)"
+
+
+def test_bfile_remains_unmapped_so_planner_marks_unsupported() -> None:
+    """BFILE is intentionally NOT in STRINGIFIED — planner marks the table UNSUPPORTED."""
+    assert "BFILE" in UNSUPPORTED_COLUMN_TYPES
 
 
 def test_xmltype_is_stringified() -> None:
     column = col("XMLTYPE")
     assert oracle_to_arrow_token(column) == "string"
-    assert export_expression(column) == "TO_CHAR(C1)"
+    # XMLSERIALIZE is required for binary-storage XMLTYPE in modern Oracle;
+    # TO_CHAR raises ORA-00932 against the default binary representation.
+    assert export_expression(column) == "XMLSERIALIZE(DOCUMENT C1 AS CLOB)"
 
 
 def test_float_type_maps_to_double() -> None:

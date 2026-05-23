@@ -1,13 +1,12 @@
 """Integration tests for tests/data/modern.dmp (Data Pump / expdp format).
 
-The dump contains the full combined sample database:
-
-    HRDATA:     DEPARTMENTS(5), JOBS(10), EMPLOYEES(30)
-    INVENTORY:  WAREHOUSES(3), PRODUCTS(24), STOCK_LEVELS(45)
-    FINANCE:    ACCOUNTS(20), TRANSACTIONS(100)
-    AUDITLOG:   CHANGE_LOG(50)
-
-Partitioned tables: PRODUCTS (LIST), TRANSACTIONS (RANGE), CHANGE_LOG (HASH).
+The dump is produced by ``scripts/create_full_combined_dump.py`` and
+exercises the full audit-coverage fixture: IOT, identity columns,
+composite/interval/reference partitioning, virtual + invisible columns,
+JSON, XMLTYPE, mixed-case identifiers, etc.  Tables containing
+fundamentally unexportable types (BFILE, user-defined OBJECT / VARRAY)
+are expected to appear in the conversion report's ``skipped`` list
+rather than as successful conversions.
 
 A single Oracle container is shared across inspect, plan, convert, convert_avro,
 and convert_csv via the ``shared_work`` module-scoped fixture.  The fixture runs
@@ -56,16 +55,70 @@ _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _MODERN_DUMP = _DATA_DIR / "modern.dmp"
 
 
+_LONG_HRDATA_NAME = "LONG_TABLE_NAME_" + "X" * 100
+
 _EXPECTED_ROWS: dict[str, dict[str, int]] = {
-    "HRDATA": {"DEPARTMENTS": 5, "JOBS": 10, "EMPLOYEES": 30},
-    "INVENTORY": {"WAREHOUSES": 3, "PRODUCTS": 24, "STOCK_LEVELS": 45},
-    "FINANCE": {"ACCOUNTS": 20, "TRANSACTIONS": 100, "MV_ACCOUNT_SUMMARY": 20},
-    "AUDITLOG": {"CHANGE_LOG": 50},
+    "AUDITLOG": {
+        "CHANGE_LOG": 50,
+        "EVENT_STREAM": 60,
+        "GTT_STAGING": 0,
+        "LONG_BLOBS": 5,
+        "LONG_NOTES": 5,
+    },
+    "FINANCE": {
+        "ACCOUNTS": 20,
+        "CHECK_NOT_NULL": 5,
+        "MV_ACCOUNT_SUMMARY": 20,
+        "NUMERIC_EDGE": 3,
+        "TRANSACTIONS": 100,
+        "TRANSACTION_DETAILS": 80,
+        "TRANSACTION_DOCS": 5,
+        "TRANSACTION_LINES": 60,
+    },
+    "HRDATA": {
+        "DEPARTMENTS": 5,
+        "DEPT_LOCATIONS": 4,
+        "DEPT_LOCATION_PHONES": 4,
+        "EMPLOYEES": 30,
+        "EMP_PREFERENCES": 30,
+        "JOBS": 10,
+        _LONG_HRDATA_NAME: 0,
+        "MixedCase_Table": 5,
+    },
+    "INVENTORY": {
+        "ORDERS": 20,
+        "ORDER_ITEMS": 20,
+        "PRODUCTS": 24,
+        "PRODUCT_SPECS": 10,
+        "STOCK_LEVELS": 45,
+        "STORE_LOCATIONS": 3,
+        "SUPPLIERS": 10,
+        "SUPPLIER_NOTES": 15,
+        "WAREHOUSES": 3,
+    },
 }
 _TOTAL_ROWS = sum(n for tbl in _EXPECTED_ROWS.values() for n in tbl.values())
 
-# Tables that are partitioned in this dump — expect PARTITION strategy in the plan.
-_PARTITIONED = {"PRODUCTS", "TRANSACTIONS", "CHANGE_LOG"}
+# Tables containing fundamentally unexportable columns/types — the
+# planner marks them UNSUPPORTED and the convert phase records them in
+# the report's ``skipped`` list.  These do NOT contribute to
+# ``_TOTAL_ROWS`` and do NOT produce parquet output.
+_EXPECTED_SKIPPED: set[tuple[str, str]] = {
+    ("AUDITLOG", "ATTACHMENTS"),  # BFILE column
+    ("FINANCE", "CUSTOMER_PROFILE"),  # user-defined ADDRESS_T object type
+    ("HRDATA", "EMP_TAGS"),  # VARRAY + nested table
+}
+
+# Tables that are partitioned in this dump — expect PARTITION strategy in
+# the plan.  Includes the new audit-coverage partitioned tables.
+_PARTITIONED = {
+    "PRODUCTS",  # LIST
+    "TRANSACTIONS",  # RANGE
+    "CHANGE_LOG",  # HASH
+    "TRANSACTION_DETAILS",  # RANGE-HASH composite
+    "TRANSACTION_LINES",  # REFERENCE
+    "EVENT_STREAM",  # INTERVAL
+}
 
 _PASSWORD = "OraclePwd_123"
 
@@ -142,7 +195,7 @@ def _reset_state(work_dir: Path) -> None:
 
 
 def _assert_output(output_dir: Path, output_format: OutputFormat, ext: str) -> None:
-    """Assert all expected tables have output files with correct row counts."""
+    """Assert expected tables produced output and skipped tables did not."""
     for schema_name, schema_tables in _EXPECTED_ROWS.items():
         for table_name, expected_rows in schema_tables.items():
             files = sorted((output_dir / schema_name / table_name).glob(f"*.{ext}"))
@@ -151,10 +204,15 @@ def _assert_output(output_dir: Path, output_format: OutputFormat, ext: str) -> N
             assert actual_rows == expected_rows, (
                 f"{schema_name}.{table_name}: expected {expected_rows} rows, got {actual_rows}"
             )
+    for schema_name, table_name in _EXPECTED_SKIPPED:
+        files = list((output_dir / schema_name / table_name).glob(f"*.{ext}"))
+        assert not files, (
+            f"Skipped table {schema_name}.{table_name} unexpectedly produced output files: {files}"
+        )
 
 
 def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
-    """Assert conversion_report.yaml and conversion_report.json exist with correct totals."""
+    """Assert the conversion report carries the expected totals + skipped set."""
     yaml_report = work_dir / "conversion_report.yaml"
     json_report = work_dir / "conversion_report.json"
     assert yaml_report.exists(), "conversion_report.yaml was not written"
@@ -166,7 +224,10 @@ def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
         f"got {stats['total_output_rows']}"
     )
     assert stats["tables_converted"] > 0, "Report shows no converted tables"
-    assert stats["tables_skipped"] == 0, f"Unexpected skipped tables: {stats['tables_skipped']}"
+    actual_skipped = {(s["schema"], s["table"]) for s in report.get("skipped", [])}
+    assert actual_skipped == _EXPECTED_SKIPPED, (
+        f"Skipped-table set mismatch: expected {_EXPECTED_SKIPPED}, got {actual_skipped}"
+    )
 
 
 # ---------------------------------------------------------------------------

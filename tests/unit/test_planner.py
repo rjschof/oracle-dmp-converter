@@ -91,3 +91,75 @@ def test_chunk_names_are_zero_padded() -> None:
     plan = plan_table(table, ConverterConfig())
     assert plan.chunks[0].name == "partition-00001-P_NORTH"
     assert plan.chunks[1].name == "partition-00002-P_SOUTH"
+
+
+def test_external_table_is_unsupported() -> None:
+    """External tables have no physical data in the staging container."""
+    table = TableMetadata(
+        schema="INVENTORY",
+        name="EXT_FEED",
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
+        table_type="EXTERNAL",
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.UNSUPPORTED
+    assert plan.reason is not None
+    assert "external table" in plan.reason.lower()
+
+
+def test_gtt_is_unsupported() -> None:
+    """Global temporary tables can't carry data through Data Pump."""
+    table = TableMetadata(
+        schema="AUDITLOG",
+        name="GTT_STAGING",
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
+        table_type="GTT",
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.UNSUPPORTED
+    assert "temporary" in (plan.reason or "").lower()
+
+
+def test_bfile_column_marks_table_unsupported() -> None:
+    """A single BFILE column forces the whole table to UNSUPPORTED."""
+    table = TableMetadata(
+        schema="AUDITLOG",
+        name="ATTACHMENTS",
+        columns=(
+            ColumnMetadata("ID", "NUMBER", 1, data_precision=10, data_scale=0),
+            ColumnMetadata("FILE_REF", "BFILE", 2),
+        ),
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.UNSUPPORTED
+    assert "BFILE" in (plan.reason or "")
+
+
+def test_object_type_column_marks_table_unsupported() -> None:
+    """User-defined OBJECT-typed columns force UNSUPPORTED (no string repr)."""
+    table = TableMetadata(
+        schema="FINANCE",
+        name="CUSTOMER_PROFILE",
+        columns=(
+            ColumnMetadata("ID", "NUMBER", 1, data_precision=10, data_scale=0),
+            ColumnMetadata("ADDR", "ADDRESS_T", 2, data_type_owner="FINANCE"),
+        ),
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.UNSUPPORTED
+    assert "user-defined type" in (plan.reason or "")
+    assert "FINANCE.ADDRESS_T" in (plan.reason or "")
+
+
+def test_varray_column_marks_table_unsupported() -> None:
+    """VARRAY columns (collection types) are treated the same as object types."""
+    table = TableMetadata(
+        schema="HRDATA",
+        name="EMP_TAGS",
+        columns=(
+            ColumnMetadata("ID", "NUMBER", 1, data_precision=10, data_scale=0),
+            ColumnMetadata("TAGS", "TAG_LIST", 2, data_type_owner="HRDATA"),
+        ),
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.UNSUPPORTED

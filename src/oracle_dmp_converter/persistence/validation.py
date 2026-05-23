@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -19,7 +20,10 @@ def count_output_rows(paths: Iterable[Path], output_format: OutputFormat) -> int
 
     * **Parquet** — reads row-group metadata; no data decoding.
     * **Avro** — iterates all records via :mod:`fastavro`.
-    * **CSV** — counts newlines minus one header line per file.
+    * **CSV** — parses with :mod:`csv` and counts data rows.  Naively
+      counting newlines is wrong for cells that contain embedded
+      newlines (e.g. multi-line XML / CLOB values), which would inflate
+      the apparent row count.
     """
     total = 0
     if output_format == OutputFormat.PARQUET:
@@ -32,10 +36,13 @@ def count_output_rows(paths: Iterable[Path], output_format: OutputFormat) -> int
                 total += sum(1 for _ in reader)
     elif output_format == OutputFormat.CSV:
         for path in paths:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()
-            # Subtract 1 for the header row; guard against completely empty files.
-            total += max(0, len(lines) - 1)
+            with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+                reader = csv.reader(fh)
+                try:
+                    next(reader)  # discard header
+                except StopIteration:
+                    continue
+                total += sum(1 for _ in reader)
     else:
         raise ValueError(f"Unsupported output format for row counting: {output_format!r}")
     return total

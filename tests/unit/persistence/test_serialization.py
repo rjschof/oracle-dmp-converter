@@ -16,12 +16,14 @@ from oracle_dmp_converter.models import (
     TableStrategy,
 )
 from oracle_dmp_converter.persistence.serialization import (
+    column_to_dict,
     load_manifest,
     load_plan,
     load_session,
     save_manifest,
     save_plan,
     save_session,
+    table_metadata_to_dict,
 )
 
 
@@ -283,3 +285,68 @@ def test_manifest_round_trip_with_partitions(tmp_path: Path) -> None:
     assert loaded == manifest
     assert loaded.tables[0].partitions[0].name == "P_2024_01"
     assert loaded.tables[0].partitions[1].position == 2
+
+
+def test_manifest_round_trip_carries_new_column_fields(tmp_path: Path) -> None:
+    """data_type_owner / hidden / comment + table_type / comment must round-trip."""
+    manifest = DumpManifest(
+        dump_paths=("/tmp/full.dmp",),
+        tables=(
+            TableMetadata(
+                schema="FINANCE",
+                name="CUSTOMER_PROFILE",
+                columns=(
+                    ColumnMetadata(
+                        name="ID",
+                        data_type="NUMBER",
+                        ordinal=1,
+                        data_precision=10,
+                        data_scale=0,
+                        comment="primary key",
+                    ),
+                    ColumnMetadata(
+                        name="ADDR",
+                        data_type="ADDRESS_T",
+                        ordinal=2,
+                        data_type_owner="FINANCE",
+                    ),
+                    ColumnMetadata(
+                        name="HIDDEN_COL",
+                        data_type="VARCHAR2",
+                        ordinal=3,
+                        hidden=True,
+                    ),
+                ),
+                table_type="GTT",
+                comment="customer profile master",
+            ),
+        ),
+    )
+    path = tmp_path / "manifest.json"
+    save_manifest(path, manifest)
+    loaded = load_manifest(path)
+
+    table = loaded.tables[0]
+    assert table.table_type == "GTT"
+    assert table.comment == "customer profile master"
+    assert table.columns[0].comment == "primary key"
+    assert table.columns[1].data_type_owner == "FINANCE"
+    assert table.columns[2].hidden is True
+
+
+def test_table_metadata_dict_omits_default_fields() -> None:
+    """Plain tables should not bloat the manifest with default-valued fields."""
+    plain_col = ColumnMetadata(name="ID", data_type="NUMBER", ordinal=1)
+    payload = column_to_dict(plain_col)
+    assert "data_type_owner" not in payload
+    assert "hidden" not in payload
+    assert "comment" not in payload
+
+    plain_table = TableMetadata(
+        schema="HR",
+        name="EMPLOYEES",
+        columns=(plain_col,),
+    )
+    tbl_payload = table_metadata_to_dict(plain_table)
+    assert "table_type" not in tbl_payload
+    assert "comment" not in tbl_payload

@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import random
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import oracledb
 
+from oracle_dmp_converter.datapump._exit_policy import RETRYABLE_ORA_CODES
 from oracle_dmp_converter.oracle.identifiers import oracle_identifier, oracle_qualified_name
 
 LOGGER = logging.getLogger(__name__)
+
+# Bounded exponential backoff for transient Oracle errors (listener
+# unreachable, timeouts, lock contention).  See ``with_oracle_retry``.
+DEFAULT_RETRY_ATTEMPTS = 5
+DEFAULT_RETRY_BASE_SECONDS = 0.5
+DEFAULT_RETRY_MAX_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -47,11 +56,15 @@ def oracle_connection(
     service: str,
     user: str,
     password: str,
+    retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
 ) -> Iterator[oracledb.Connection]:
     """Context manager that yields a connected :class:`oracledb.Connection`.
 
     Closes the connection when the ``with`` block exits, whether normally or
-    due to an exception.
+    due to an exception.  Connection acquisition is retried via
+    :func:`with_oracle_retry` for transient errors (listener unreachable,
+    timeouts) so flaky networks or a still-warming-up container don't
+    abort the whole conversion.
 
     Args:
         host: Database hostname or IP address.
@@ -59,15 +72,82 @@ def oracle_connection(
         service: Oracle service name (e.g. ``"FREEPDB1"``).
         user: Oracle username.
         password: Oracle password.
+        retry_attempts: Maximum number of connection attempts before giving
+            up.  Set to ``1`` to disable retries.
 
     Yields:
         An open :class:`oracledb.Connection`.
     """
-    conn = oracledb.connect(user=user, password=password, dsn=f"{host}:{port}/{service}")
+    dsn = f"{host}:{port}/{service}"
+    conn = with_oracle_retry(
+        lambda: oracledb.connect(user=user, password=password, dsn=dsn),
+        attempts=retry_attempts,
+        what=f"oracledb.connect({dsn})",
+    )
     try:
         yield conn
     finally:
         conn.close()
+
+
+def with_oracle_retry[T](
+    operation: Callable[[], T],
+    *,
+    attempts: int = DEFAULT_RETRY_ATTEMPTS,
+    base_seconds: float = DEFAULT_RETRY_BASE_SECONDS,
+    max_seconds: float = DEFAULT_RETRY_MAX_SECONDS,
+    what: str = "oracle operation",
+) -> T:
+    """Invoke *operation* with bounded exponential-backoff retry.
+
+    Re-runs *operation* when it raises an :class:`oracledb.DatabaseError`
+    whose ORA code is in :data:`RETRYABLE_ORA_CODES` (listener unreachable,
+    TNS timeouts, row-lock contention, etc.).  Any other exception type, or
+    an Oracle error code not classified as retryable, propagates unchanged
+    so genuine misconfiguration (bad credentials, missing privileges) fails
+    fast.
+
+    Args:
+        operation: Zero-arg callable to execute.
+        attempts: Total number of attempts (including the first).  ``1``
+            disables retry.
+        base_seconds: Initial backoff delay between attempts; doubles each
+            time until capped at *max_seconds*.
+        max_seconds: Upper bound on the backoff delay.
+        what: Short description used in log messages so a retry storm in
+            the log can be traced to its caller.
+
+    Returns:
+        Whatever *operation* returns on its first successful invocation.
+
+    Raises:
+        Exception: The last exception raised by *operation* once all
+            attempts are exhausted, or any non-retryable exception
+            encountered along the way.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except oracledb.DatabaseError as exc:
+            code = _oracle_error_code(exc)
+            last_exc = exc
+            if code not in RETRYABLE_ORA_CODES or attempt == attempts:
+                raise
+            delay = min(max_seconds, base_seconds * (2 ** (attempt - 1)))
+            delay += random.uniform(0, delay * 0.1)  # noqa: S311 — non-crypto jitter
+            LOGGER.warning(
+                "%s failed with ORA-%05d (attempt %d/%d); retrying in %.2fs",
+                what,
+                code or 0,
+                attempt,
+                attempts,
+                delay,
+            )
+            time.sleep(delay)
+    # Unreachable: the loop either returns or re-raises.
+    assert last_exc is not None
+    raise last_exc
 
 
 def _oracle_error_code(exc: Exception) -> int | None:
@@ -105,7 +185,7 @@ def execute_ignore(conn: oracledb.Connection, sql: str, ignored_codes: set[int])
     try:
         with conn.cursor() as cursor:
             cursor.execute(sql)
-    except Exception as exc:  # noqa: BLE001 - Oracle driver wraps errors by code.
+    except oracledb.DatabaseError as exc:
         if _oracle_error_code(exc) not in ignored_codes:
             raise
 
@@ -141,7 +221,7 @@ def ensure_schema(conn: oracledb.Connection, schema: str, password: str) -> None
     try:
         with conn.cursor() as cursor:
             cursor.execute(f"CREATE USER {ident} IDENTIFIED BY {quoted_password}")
-    except Exception as exc:  # noqa: BLE001 - Oracle driver wraps errors by code.
+    except oracledb.DatabaseError as exc:
         if _oracle_error_code(exc) != 1920:
             raise
         with conn.cursor() as cursor:

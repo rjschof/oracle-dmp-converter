@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -85,10 +86,34 @@ def arrow_schema_for_columns(
     """
     overrides = overrides or {}
     fields = [
-        pa.field(column.name, arrow_type_for_column(column, overrides.get(column.name)))
+        pa.field(
+            column.name,
+            arrow_type_for_column(column, overrides.get(column.name)),
+            metadata=_field_metadata_for(column),
+        )
         for column in columns
     ]
     return pa.schema(fields)
+
+
+def _field_metadata_for(column: ColumnMetadata) -> dict[bytes, bytes] | None:
+    """Return Arrow field metadata for *column*, or ``None`` if there is none.
+
+    Currently exposes:
+
+    - ``oracle_data_type`` — the original Oracle type string.
+    - ``oracle_comment`` — the ``ALL_COL_COMMENTS`` comment when present.
+
+    These travel into the Parquet file's column metadata so downstream
+    consumers can recover Oracle semantics without re-querying the
+    catalog.
+    """
+    metadata: dict[bytes, bytes] = {
+        b"oracle_data_type": column.data_type.encode("utf-8"),
+    }
+    if column.comment:
+        metadata[b"oracle_comment"] = column.comment.encode("utf-8")
+    return metadata
 
 
 def _read_lob(value: Any) -> Any:
@@ -98,16 +123,52 @@ def _read_lob(value: Any) -> Any:
     with a ``read()`` method.  This helper calls ``read()`` when present,
     returning the raw bytes/str, and passes any other value through unchanged.
 
+    ``oracledb.DbObject`` values (returned for OBJECT / VARRAY / nested
+    table columns) also expose ``read()`` indirectly — but calling it
+    raises.  Detect them explicitly and emit a JSON-ish string instead
+    of letting them slip through to ``str(value)`` and produce repr
+    noise like ``<oracledb.DbObject ADDRESS_T at 0x…>``.
+
     Args:
         value: Row value as returned by ``oracledb``.
 
     Returns:
-        The materialised value (``str`` or ``bytes`` for LOBs, or the
-        original value unchanged for everything else).
+        The materialised value (``str`` or ``bytes`` for LOBs, JSON-ish
+        text for DbObject, or the original value unchanged otherwise).
     """
+    if isinstance(value, oracledb.DbObject):
+        return _db_object_to_text(value)
     if hasattr(value, "read") and callable(value.read):
         return value.read()
     return value
+
+
+def _db_object_to_text(obj: oracledb.DbObject) -> str:
+    """Serialise an :class:`oracledb.DbObject` to JSON-ish text.
+
+    ``oracledb.DbObject`` represents Oracle OBJECT, VARRAY, and nested
+    table values.  The driver exposes attribute access for OBJECT types
+    (via ``obj.type.attributes``) and iteration for collection types.
+    We recurse through whichever structure applies and emit a stable
+    JSON-style string so downstream readers see meaningful data instead
+    of a Python repr.
+    """
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, oracledb.DbObject):
+            type_info = node.type
+            if type_info.iscollection:
+                return [_walk(item) for item in node.aslist()]
+            return {attr.name: _walk(getattr(node, attr.name)) for attr in type_info.attributes}
+        if isinstance(node, (bytes, bytearray)):
+            return node.decode("utf-8", errors="replace")
+        if isinstance(node, (datetime, date)):
+            return node.isoformat()
+        if isinstance(node, Decimal):
+            return str(node)
+        return node
+
+    return json.dumps(_walk(obj), default=str, sort_keys=True)
 
 
 def _coerce_value(value: Any, arrow_type: pa.DataType) -> Any:
@@ -146,7 +207,12 @@ def _coerce_value(value: Any, arrow_type: pa.DataType) -> Any:
         scale = arrow_type.scale
         if scale >= 0:
             quantizer = Decimal(1).scaleb(-scale)
-            return decimal_value.quantize(quantizer, rounding=ROUND_HALF_UP)
+            # Widen the Decimal context to at least the Arrow column's
+            # precision so values up to NUMBER(38) don't trip
+            # InvalidOperation against Python's default 28-digit precision.
+            with localcontext() as ctx:
+                ctx.prec = max(ctx.prec, arrow_type.precision + 1)
+                return decimal_value.quantize(quantizer, rounding=ROUND_HALF_UP)
         return decimal_value
     if pa.types.is_timestamp(arrow_type):
         if isinstance(value, datetime):
@@ -214,7 +280,7 @@ def export_table(
     if partition_name:
         table_ref = f"{table_ref} PARTITION ({oracle_identifier(partition_name)})"
     sql = f"SELECT {select_list} FROM {table_ref}"
-
+    LOGGER.debug("export_table SQL: %s", sql)
     total_rows = 0
     writer: FormatWriter = make_writer(output_format, output_path, arrow_schema)
     has_rows = False
