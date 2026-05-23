@@ -264,16 +264,24 @@ class LegacyDumpWorkflow(DumpWorkflow):
     ) -> None:
         """Import one chunk of table data into the staging schema.
 
-        Legacy ``imp`` does not support ``QUERY=`` or partition-level imports;
-        ``chunk_name``, ``partition_name``, and ``subpartition_name`` are
-        ignored and the whole table is always imported.  The planner must not
-        produce ``HASH`` or ``PARTITION`` chunks for legacy dumps.
+        Legacy ``imp`` does not support ``QUERY=`` (so arbitrary WHERE-filter
+        chunking is impossible), but it *does* accept partition and
+        subpartition names directly in the ``TABLES=`` parameter via the
+        ``schema.table:NAME`` syntax — both partition and subpartition names
+        are valid in the ``:NAME`` slot since subpartition names are unique
+        within a table.
+
+        When *subpartition_name* is set it takes precedence over
+        *partition_name*; when neither is set the whole table is imported.
         """
+        qualifier = subpartition_name or partition_name
+        table_spec = f"{table}:{qualifier}" if qualifier else table
         LOGGER.debug(
-            "Importing legacy chunk %s for %s.%s -> %s",
+            "Importing legacy chunk %s for %s.%s%s -> %s",
             chunk_name,
             source_schema,
             table,
+            f":{qualifier}" if qualifier else "",
             stage_schema,
         )
         job = LegacyImportJob(
@@ -282,7 +290,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
             logfile=f"imp-{source_schema}-{table}-{chunk_name}.log"[:120],
             fromuser=source_schema,
             touser=stage_schema,
-            tables=(table,),
+            tables=(table_spec,),
             rows=True,
             indexes=False,
             grants=False,
@@ -299,36 +307,47 @@ class LegacyDumpWorkflow(DumpWorkflow):
         Legacy ``imp`` only supports a single ``FROMUSER``/``TOUSER`` pair per
         invocation, so cross-schema batching is not possible.  Chunks are
         grouped by ``(source_schema, stage_schema)`` and one ``imp`` call is
-        issued per distinct schema pair, with all table names for that pair
-        combined into the ``TABLES=`` list.
-
-        ``chunk_name``, ``partition_name``, and ``subpartition_name`` are
-        ignored — legacy ``imp`` has no ``QUERY=`` support.
+        issued per distinct schema pair, with each chunk's table+qualifier
+        combined into the ``TABLES=`` list (``schema.table:NAME`` style,
+        where NAME is a partition or subpartition name).
         """
         if not chunks:
             return
-        # Group tables by (source_schema, stage_schema), preserving order.
+        # Group table specs by (source_schema, stage_schema), preserving order.
+        # Each spec is "TABLE" or "TABLE:qualifier" for partition/subpartition
+        # filtering.  Subpartition takes precedence over partition.
         schema_groups: dict[tuple[str, str], list[str]] = {}
-        for source_schema, stage_schema, table, _chunk_name, _partition_name, _sub in chunks:
+        for (
+            source_schema,
+            stage_schema,
+            table,
+            _chunk_name,
+            partition_name,
+            subpartition_name,
+        ) in chunks:
+            qualifier = subpartition_name or partition_name
+            spec = f"{table}:{qualifier}" if qualifier else table
             key = (source_schema, stage_schema)
-            schema_groups.setdefault(key, []).append(table)
+            schema_groups.setdefault(key, []).append(spec)
 
-        for (source_schema, stage_schema), tables in schema_groups.items():
-            unique_tables = tuple(dict.fromkeys(tables))
+        for (source_schema, stage_schema), specs in schema_groups.items():
+            unique_specs = tuple(dict.fromkeys(specs))
             LOGGER.debug(
-                "Batch-importing %d legacy table(s) for %s -> %s via single imp call",
-                len(unique_tables),
+                "Batch-importing %d legacy table-spec(s) for %s -> %s via single imp call",
+                len(unique_specs),
                 source_schema,
                 stage_schema,
             )
-            logfile = f"imp-batch-{source_schema}-{'-'.join(unique_tables[:3])}.log"[:120]
+            # Use just the table portion of each spec for the log filename.
+            short_names = [s.split(":", 1)[0] for s in unique_specs[:3]]
+            logfile = f"imp-batch-{source_schema}-{'-'.join(short_names)}.log"[:120]
             job = LegacyImportJob(
                 connection=self._credentials,
                 files=self._legacy_files(),
                 logfile=logfile,
                 fromuser=source_schema,
                 touser=stage_schema,
-                tables=unique_tables,
+                tables=unique_specs,
                 rows=True,
                 indexes=False,
                 grants=False,

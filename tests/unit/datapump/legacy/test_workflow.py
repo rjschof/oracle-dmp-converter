@@ -103,6 +103,48 @@ class TestImportChunksBatchSingleSchema:
         assert job.constraints is False
 
 
+class TestImportChunkPartitionSyntax:
+    """Partition / subpartition filtering via TABLES=schema.table:NAME."""
+
+    def test_partition_name_appended_to_table_spec(self, tmp_path: Path) -> None:
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunk("HRDATA", "DMP_HRDATA", "EMPLOYEES", "part1", "P_NORTH")
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        assert job.tables == ("EMPLOYEES:P_NORTH",)
+
+    def test_subpartition_takes_precedence_over_partition(self, tmp_path: Path) -> None:
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunk(
+            "FINANCE", "DMP_FINANCE", "TXN_DETAILS", "sp1", "P_2024", "SYS_SUBP357"
+        )
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        # Bare schema.table:subpartition — parent partition NOT in the spec.
+        assert job.tables == ("TXN_DETAILS:SYS_SUBP357",)
+
+    def test_no_qualifier_when_neither_partition_nor_subpartition_set(self, tmp_path: Path) -> None:
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunk("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None)
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        assert job.tables == ("EMPLOYEES",)
+
+    def test_batch_mixes_qualified_and_unqualified_table_specs(self, tmp_path: Path) -> None:
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunks_batch(
+            [
+                ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+                ("HRDATA", "DMP_HRDATA", "TXN_DETAILS", "p1", "P_2024", None),
+                ("HRDATA", "DMP_HRDATA", "TXN_DETAILS", "sp1", "P_2024", "SYS_SUBP1"),
+            ]
+        )
+        # One imp call for the schema pair; TABLES= contains all three specs.
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        assert set(job.tables) == {
+            "EMPLOYEES",
+            "TXN_DETAILS:P_2024",
+            "TXN_DETAILS:SYS_SUBP1",
+        }
+
+
 class TestImportChunksBatchMultiSchema:
     def test_two_schemas_produce_two_imp_calls(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)

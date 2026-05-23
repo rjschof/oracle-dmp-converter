@@ -51,8 +51,14 @@ def test_whole_strategy_override_forces_whole_table() -> None:
     assert len(plan.chunks) == 1
 
 
-def test_legacy_format_table_plans_whole_table() -> None:
-    """Legacy (exp) dumps always produce WHOLE_TABLE plans, even for partitioned tables."""
+def test_legacy_format_partitioned_table_now_drills_down() -> None:
+    """Legacy (exp) dumps now produce PARTITION plans for partitioned tables.
+
+    Oracle's ``imp`` accepts partition (and subpartition) names directly in
+    ``TABLES=schema.table:NAME``, so we no longer force WHOLE_TABLE for
+    legacy dumps.  Empirically verified by
+    ``scripts/verify_legacy_subpartition_import.py``.
+    """
     table = TableMetadata(
         schema="SALES",
         name="FACT",
@@ -61,8 +67,31 @@ def test_legacy_format_table_plans_whole_table() -> None:
         partitions=(PartitionMetadata("P1", 1), PartitionMetadata("P2", 2)),
     )
     plan = plan_table(table, ConverterConfig(), dump_format=DumpFormat.LEGACY)
-    assert plan.strategy == TableStrategy.WHOLE_TABLE
-    assert len(plan.chunks) == 1
+    assert plan.strategy == TableStrategy.PARTITION
+    assert [c.partition_name for c in plan.chunks] == ["P1", "P2"]
+
+
+def test_legacy_format_composite_table_drills_into_subpartitions() -> None:
+    """Legacy + composite partitioning: one chunk per physical subpartition."""
+    table = TableMetadata(
+        schema="FINANCE",
+        name="TXN_DETAILS",
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
+        partitions=(
+            PartitionMetadata(
+                "P_2024",
+                1,
+                subpartitions=(
+                    SubpartitionMetadata("SYS_SUBP001", 1, "P_2024"),
+                    SubpartitionMetadata("SYS_SUBP002", 2, "P_2024"),
+                ),
+            ),
+        ),
+    )
+    plan = plan_table(table, ConverterConfig(), dump_format=DumpFormat.LEGACY)
+    assert plan.strategy == TableStrategy.PARTITION
+    assert len(plan.chunks) == 2
+    assert all(c.subpartition_name is not None for c in plan.chunks)
 
 
 def test_unrecognized_strategy_returns_unsupported() -> None:
