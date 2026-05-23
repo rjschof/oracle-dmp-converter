@@ -60,10 +60,13 @@ Integration tests auto-skip when Docker is unavailable (autouse `skip_if_no_dock
 ## Architecture notes
 
 ### Dump format auto-detection
-`create_workflow()` (`src/oracle_dmp_converter/datapump/workflow.py`) first tries modern `impdp SQLFILE=`. On `ORA-39142` or `ORA-39143` it automatically falls back to legacy `imp INDEXFILE=`. A `_ProbedModernWorkflow` wrapper caches the discovered table list so `discover_tables()` is not called twice.
+`create_workflow()` (`src/oracle_dmp_converter/datapump/workflow.py`) first tries modern `impdp SQLFILE=`. On `ORA-39142` or `ORA-39143` it automatically falls back to legacy `imp INDEXFILE=`. A `_ProbedModernWorkflow` wrapper caches the discovered table list so `discover_tables()` is not called twice. Concrete workflows live in the `datapump/modern/` and `datapump/legacy/` subpackages.
+
+### Partitioning is format-independent
+Both modern and legacy dumps support partition- and subpartition-level imports. The planner (`plan_table`) emits one chunk per partition (or per subpartition for composite tables) regardless of dump format — legacy `imp` accepts partition/subpartition names via its `TABLES=schema.table:NAME` syntax. The `dump_format` argument to `plan_table`/`plan_tables` is retained only for API symmetry. Neither format supports arbitrary `QUERY=`/WHERE-filter chunking; a non-partitioned table that exceeds staging capacity can only use the whole-table strategy.
 
 ### Staging schema pattern
-Source schema `SCHEMA` is imported into staging schema `DMP_SCHEMA`. Each chunk import drops the staging table, imports, exports, and drops again. Resumability is tracked in a SQLite `StateStore` at `<work_dir>/convert/state.sqlite`.
+Source schema `SCHEMA` is imported into staging schema `DMP_SCHEMA`. Staging schemas are prepared once per run (cached in `_prepared_schemas`), not per chunk. Chunks are imported in batches via a single `impdp`/`imp` invocation (`import_chunks_batch`) rather than one process per chunk — see `convert_table_batch`/`convert_plan` in `core/executor.py`. Resumability is tracked in a SQLite `StateStore` at `<work_dir>/convert/state.sqlite`.
 
 ### Docker/Podman
 The tool uses the Docker SDK Python library for container management but runs `docker exec` / `docker cp` via `subprocess`, not the SDK exec API (SDK's chunked HTTP stream never closes EOF). Works with both Docker and Podman.
@@ -77,7 +80,7 @@ The tool uses the Docker SDK Python library for container management but runs `d
 - Per-column overrides in `config.yaml` can override both the SQL expression and Arrow type
 
 ### Output path convention
-`<output_dir>/<schema_lower>/<table_lower>/<chunk>.<ext>` where non-alphanumeric chars in names are replaced with `_`. Chunk name patterns: `whole`, `partition-00001-P_NORTH`, `hash-00000-of-00064`, `hash-null`.
+`<output_dir>/<schema_lower>/<table_lower>/<chunk>.<ext>` where non-alphanumeric chars in names are replaced with `_`. Chunk name patterns (`src/oracle_dmp_converter/planner.py`): `whole`, `partition-00001-P_NORTH`, and `subpartition-00001-00002-P_NORTH-SP_A` for composite-partitioned tables (one chunk per physical subpartition).
 
 ---
 
@@ -103,6 +106,16 @@ The tool uses the Docker SDK Python library for container management but runs `d
 
 ---
 
-## No CI or pre-commit configured
+## CI
 
-No `.github/workflows/`, no `.pre-commit-config.yaml`. The `Makefile` is the only task runner.
+GitHub Actions, defined in `.github/workflows/`:
+
+- **`ci.yml`** runs on every push and pull request (all branches) with five independent jobs:
+  - `format-check` → `make format-check`
+  - `lint` → `make lint`
+  - `unit-tests` → `uv run pytest tests/unit --cov --cov-report=term-missing` (uploads `htmlcov/` as an artifact)
+  - `modern-integration-tests` → `tests/integration/test_data_modern_dump.py` (30-min timeout)
+  - `legacy-integration-tests` → `tests/integration/test_data_legacy_dump.py` (30-min timeout)
+- **`release.yml`** runs on published GitHub releases: `uv build`, then uploads the wheel and sdist as release assets.
+
+No `.pre-commit-config.yaml`. The `Makefile` is the local task runner; CI calls the same `make` targets.

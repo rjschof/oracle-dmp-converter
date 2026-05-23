@@ -18,13 +18,15 @@ The implementation is chunk-oriented so large dumps can be processed table-by-ta
 - Legacy `exp`/`imp` format auto-detection and fallback.
 - Full-dump table discovery using Data Pump `SQLFILE` (or `imp INDEXFILE=` for legacy dumps).
 - Per-table metadata inspection using `CONTENT=METADATA_ONLY` imports.
-- Plan generation for whole-table and partition conversion strategies.
-- Real partition-level Data Pump imports.
+- Plan generation for whole-table, partition, and subpartition conversion strategies.
+- Real partition- and subpartition-level imports for both modern (`impdp`) and legacy (`imp`) dumps.
+- Batched chunk imports (multiple chunks per Data Pump invocation) for faster conversion.
 - Streaming Oracle table export to Parquet, Avro, or CSV with PyArrow / fastavro.
 - Row-count validation for each converted chunk.
 - SQLite state tracking for resumable chunk conversion.
 - Unit tests for deterministic planning/parfile/type behaviour.
 - Docker integration tests that create Oracle schemas, export full Data Pump dumps, inspect/plan/convert them, and verify output.
+- GitHub Actions CI for format, lint, unit, and modern/legacy integration tests.
 
 ## Default Oracle image
 
@@ -173,9 +175,10 @@ Per-column `parquet_type` and `expression` overrides in `config.yaml` take uncon
 
 Legacy (`exp`) dumps are auto-detected at inspect time. `impdp SQLFILE=` is attempted first; if Oracle returns `ORA-39142` or `ORA-39143` the converter falls back to `imp INDEXFILE=` for table discovery.
 
+Partition- and subpartition-level imports are supported for legacy dumps via `imp`'s `TABLES=schema.table:NAME` syntax, so partitioned tables are chunked the same way as modern Data Pump dumps.
+
 Constraints for legacy dumps:
-- Only the **whole-table** strategy is available — `imp` has no `QUERY=` support.
-- Partitioned tables are imported as a single unit.
+- No `QUERY=` support, so arbitrary WHERE-filter chunking is unavailable. A non-partitioned table can only use the whole-table strategy.
 
 ## Output structure
 
@@ -185,6 +188,9 @@ Files are written to `<output_dir>/<schema>/<table>/<chunk>.<ext>` where schema 
 |---|---|
 | Whole table | `whole.parquet` / `whole.avro` / `whole.csv` |
 | Partition | `partition-00001-<PARTITION_NAME>.parquet` |
+| Subpartition | `subpartition-00001-00002-<PARTITION_NAME>-<SUBPARTITION_NAME>.parquet` |
+
+Composite-partitioned tables emit one chunk per physical subpartition.
 
 ## Sample dumps
 
@@ -249,3 +255,7 @@ uv run python -m pytest tests/integration
 ```
 
 The integration tests may take several minutes on the first run because the Oracle image must be pulled and the database must initialize.
+
+### Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request: format check, lint, unit tests with coverage, and the modern and legacy integration suites as separate jobs. Releases are built and published via `.github/workflows/release.yml`.

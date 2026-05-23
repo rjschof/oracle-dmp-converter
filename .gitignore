@@ -13,3 +13,4 @@ tests/runs/
 *.dmp
 *.log
 .coverage
+docs/plans/
