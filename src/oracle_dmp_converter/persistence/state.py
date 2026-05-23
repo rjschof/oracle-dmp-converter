@@ -76,6 +76,13 @@ class StateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.sidecar = sidecar
         self.conn = sqlite3.connect(path)
+        # When False, ``upsert`` skips its per-call commit and sidecar write
+        # so a caller can batch many upserts into one commit via
+        # ``deferred_commit``.  Defaults to per-call commit for safety.
+        self._autocommit = True
+        # Completed states accumulated during a ``deferred_commit`` block;
+        # their sidecars are written together when the block commits.
+        self._deferred_completed: list[ChunkState] = []
         self._migrate()
         self.conn.execute(
             """
@@ -132,10 +139,10 @@ class StateStore:
 
         Uses ``INSERT … ON CONFLICT … DO UPDATE`` so that repeated calls for
         the same ``(table_name, chunk_name)`` pair replace the previous row.
-        Changes are committed immediately.  On a ``completed`` transition
-        with non-null row counts, also writes a JSON sidecar file so the
-        run can be reconciled if the SQLite file is later corrupted or
-        truncated.
+        Outside a :meth:`deferred_commit` block, changes are committed
+        immediately and a ``completed`` transition writes its JSON sidecar
+        right away.  Inside a ``deferred_commit`` block the commit and
+        sidecar writes are batched to the end of the block.
 
         Args:
             state: The chunk state to persist.
@@ -159,9 +166,37 @@ class StateStore:
                 state.error,
             ),
         )
-        self.conn.commit()
-        if self.sidecar and state.status == "completed":
-            self._write_sidecar(state)
+        if self._autocommit:
+            self.conn.commit()
+            if self.sidecar and state.status == "completed":
+                self._write_sidecar(state)
+        elif self.sidecar and state.status == "completed":
+            self._deferred_completed.append(state)
+
+    @contextmanager
+    def deferred_commit(self) -> Iterator[None]:
+        """Batch every :meth:`upsert` in the block into a single commit.
+
+        Suspends per-upsert commits and sidecar writes; on clean exit
+        commits once and flushes the accumulated ``completed`` sidecars,
+        rolling back (and discarding the pending sidecars) on exception.
+        Resumability granularity becomes per-block rather than per-chunk:
+        a crash inside the block re-does the whole block's work on resume,
+        which is safe because staging re-import is idempotent.
+        """
+        self._autocommit = False
+        self._deferred_completed = []
+        try:
+            yield
+            self.conn.commit()
+            for state in self._deferred_completed:
+                self._write_sidecar(state)
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._autocommit = True
+            self._deferred_completed = []
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -284,3 +319,17 @@ class StateStore:
         if row is None:
             return None
         return ChunkState(*row)
+
+    def snapshot(self) -> dict[tuple[str, str], ChunkState]:
+        """Return every stored chunk state in one query, keyed by chunk.
+
+        Lets a caller fetch all states once at the start of a convert run
+        instead of issuing a per-chunk :meth:`get` inside nested loops.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT table_name, chunk_name, status, imported_rows, output_rows, error
+            FROM chunks
+            """
+        ).fetchall()
+        return {(row[0], row[1]): ChunkState(*row) for row in rows}

@@ -3,18 +3,27 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from oracle_dmp_converter.config import ConverterConfig
-from oracle_dmp_converter.core.executor import StagingExecutor
+from oracle_dmp_converter.core.executor import (
+    StagingExecutor,
+    _emit_phase_timing,
+    _phase_timer,
+)
 from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.models import (
+    ChunkPlan,
     ColumnMetadata,
+    ConversionPlan,
     DumpFormat,
     TableMetadata,
+    TablePlan,
+    TableStrategy,
 )
 from oracle_dmp_converter.runtime.admin import OracleAdminConnection
 
@@ -387,3 +396,171 @@ class TestImportTableChunkTablespaceRecovery:
         ):
             with pytest.raises(DataPumpError):
                 executor.import_table_chunk(source_schema="SRC", table="ORDERS", chunk_name="whole")
+
+
+class TestPhaseTimingHelpers:
+    """Cover the gated phase-timing instrumentation helpers."""
+
+    def test_emit_is_noop_when_env_var_unset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("DMP_CONVERTER_PHASE_TIMING_FILE", raising=False)
+        target = tmp_path / "should_not_exist.jsonl"
+        _emit_phase_timing("preclear_modern_plan", tables=5)
+        assert not target.exists()
+
+    def test_emit_appends_jsonl_when_env_var_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "phases.jsonl"
+        monkeypatch.setenv("DMP_CONVERTER_PHASE_TIMING_FILE", str(target))
+        _emit_phase_timing("import_batch", dump_format="datapump", chunks=12)
+        _emit_phase_timing("export_chunk", table="HR.EMP", chunk="whole")
+
+        lines = target.read_text().splitlines()
+        assert len(lines) == 2
+        first = json.loads(lines[0])
+        assert first == {"phase": "import_batch", "dump_format": "datapump", "chunks": 12}
+        second = json.loads(lines[1])
+        assert second == {"phase": "export_chunk", "table": "HR.EMP", "chunk": "whole"}
+
+    def test_emit_swallows_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Point at a path that can never be opened (directory that doesn't exist).
+        monkeypatch.setenv(
+            "DMP_CONVERTER_PHASE_TIMING_FILE", "/nonexistent/dir/phases.jsonl"
+        )
+        # Must not raise.
+        _emit_phase_timing("preclear_legacy_batch", chunks=3)
+
+    def test_phase_timer_records_elapsed_ms(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "phases.jsonl"
+        monkeypatch.setenv("DMP_CONVERTER_PHASE_TIMING_FILE", str(target))
+
+        with _phase_timer("preclear_modern_plan", dump_format="datapump", tables=7):
+            pass  # zero-work block; just verifying the record shape
+
+        lines = target.read_text().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["phase"] == "preclear_modern_plan"
+        assert record["dump_format"] == "datapump"
+        assert record["tables"] == 7
+        assert isinstance(record["took_ms"], (int, float))
+        assert record["took_ms"] >= 0
+
+
+def _whole_table_plan(schema: str, table: str) -> TablePlan:
+    return TablePlan(
+        schema=schema,
+        table=table,
+        strategy=TableStrategy.WHOLE_TABLE,
+        chunks=(ChunkPlan(name="whole", strategy=TableStrategy.WHOLE_TABLE),),
+    )
+
+
+def _fake_metadata(schema: str, table: str) -> TableMetadata:
+    return TableMetadata(
+        schema=schema,
+        name=table,
+        columns=(ColumnMetadata("ID", "NUMBER", 1, nullable=False),),
+    )
+
+
+def _fake_export(tmp_path: Path, schema: str, table: str) -> MagicMock:
+    m = MagicMock()
+    m.rows = 5
+    m.path = tmp_path / schema / table / "whole.parquet"
+    return m
+
+
+def _cursor_returning(fetchone_value: object) -> MagicMock:
+    """Context-managed mock cursor whose fetchone() returns a fixed value."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = fetchone_value
+    cursor_ctx = MagicMock()
+    cursor_ctx.__enter__ = lambda s: mock_cursor
+    cursor_ctx.__exit__ = MagicMock(return_value=False)
+    return cursor_ctx
+
+
+class TestStageMetadataCache:
+    """T1.1 — staging metadata is discovered once per (stage_schema, table)."""
+
+    def test_caches_metadata_across_chunks_of_same_table(self, tmp_path: Path) -> None:
+        executor = _make_executor(tmp_path=tmp_path)
+        _, mock_ctx = _mock_conn_ctx()
+
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch(
+                "oracle_dmp_converter.core.executor.discover_table_metadata",
+                return_value=_fake_metadata("DMP_SRC", "ORDERS"),
+            ) as mock_discover,
+            patch("oracle_dmp_converter.core.executor.count_rows", return_value=5),
+            patch(
+                "oracle_dmp_converter.core.executor.export_table",
+                return_value=_fake_export(tmp_path, "src", "orders"),
+            ),
+        ):
+            for chunk_name in ("partition-1", "partition-2"):
+                executor.export_stage_table(
+                    source_schema="SRC",
+                    table="ORDERS",
+                    chunk_name=chunk_name,
+                    output_dir=tmp_path,
+                )
+            assert mock_discover.call_count == 1  # same table → one discovery
+
+            executor.export_stage_table(
+                source_schema="SRC",
+                table="INVOICES",
+                chunk_name="whole",
+                output_dir=tmp_path,
+            )
+            assert mock_discover.call_count == 2  # different table → cache miss
+
+
+class TestValidateMetadataState:
+    """T1.4 — validate_metadata_state only fails-fast on missing users."""
+
+    def _plan(self) -> ConversionPlan:
+        return ConversionPlan(
+            dump_paths=("test.dmp",),
+            oracle_image="gvenzl/oracle-free:23-faststart",
+            tables=(_whole_table_plan("SRC", "ORDERS"),),
+        )
+
+    def test_raises_on_missing_user(self) -> None:
+        executor = _make_executor()
+        executor.metadata_imported = True
+        mock_conn, mock_ctx = _mock_conn_ctx()
+        mock_conn.cursor.return_value = _cursor_returning(None)  # user not found
+
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.table_exists") as mock_table_exists,
+        ):
+            with pytest.raises(ValueError, match="missing staging users"):
+                executor.validate_metadata_state(self._plan())
+        mock_table_exists.assert_not_called()
+
+    def test_passes_without_per_table_existence_query(self) -> None:
+        executor = _make_executor()
+        executor.metadata_imported = True
+        mock_conn, mock_ctx = _mock_conn_ctx()
+        mock_conn.cursor.return_value = _cursor_returning((1,))  # user found
+
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.table_exists") as mock_table_exists,
+        ):
+            executor.validate_metadata_state(self._plan())  # no raise
+        mock_table_exists.assert_not_called()
+
+    def test_noop_when_metadata_not_imported(self) -> None:
+        executor = _make_executor()
+        executor.metadata_imported = False
+        # No connection patched: must return before touching Oracle.
+        executor.validate_metadata_state(self._plan())

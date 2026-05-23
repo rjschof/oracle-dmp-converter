@@ -9,8 +9,12 @@ exp/imp) is delegated to :class:`DumpWorkflow`.
 
 from __future__ import annotations
 
+import json
 import logging
-from contextlib import AbstractContextManager
+import os
+import time
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,6 +79,41 @@ _STAGE_SCHEMA_PREFIX = "DMP_"
 
 # Number of tables combined into a single impdp/imp invocation.
 TABLE_IMPORT_BATCH_SIZE = 20
+
+# Env var name for the optional phase-timing JSONL output.  When set to a
+# writable path, the helpers below append one record per timed phase so we
+# can attribute wall-clock between pre-clear, import-binary, and export
+# phases.  Off by default.
+_PHASE_TIMING_ENV = "DMP_CONVERTER_PHASE_TIMING_FILE"
+
+
+def _emit_phase_timing(phase: str, **fields: object) -> None:
+    """Append a JSONL phase-timing record when the env var points at a file.
+
+    Diagnostic hook used to attribute integration-test wall-clock.  Never
+    raises: a failed write is swallowed so instrumentation can't break the
+    convert path.
+    """
+    path = os.environ.get(_PHASE_TIMING_ENV)
+    if not path:
+        return
+    record = {"phase": phase, **fields}
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
+@contextmanager
+def _phase_timer(phase: str, **static_fields: object) -> Iterator[None]:
+    """Context manager that emits a phase-timing record on exit."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        _emit_phase_timing(phase, **static_fields, took_ms=round(elapsed_ms, 2))
 
 
 def chunk_output_path(
@@ -141,6 +180,14 @@ class StagingExecutor:
         # (created, granted quotas) during this executor's lifetime.  Mirrored
         # into ``ContainerSession.prepared_schemas`` on shutdown.
         self._prepared_schemas: set[str] = set()
+        # Cache of staging-table metadata keyed on (stage_schema, table).
+        # ``export_stage_table`` runs once per chunk, so without this a
+        # partitioned table re-discovers identical column/constraint
+        # metadata for every chunk.  The staging structure is stable for
+        # the lifetime of staging; the pre-clear helpers drop the cache
+        # defensively so a structure-changing re-import can't serve stale
+        # columns.
+        self._table_metadata_cache: dict[tuple[str, str], TableMetadata] = {}
         # True after :meth:`inspect_dump` has successfully imported metadata
         # for every discovered schema.  Persisted into
         # ``ContainerSession.metadata_imported`` so a later ``convert`` run
@@ -461,14 +508,16 @@ class StagingExecutor:
         with no prior inspect phase, in which case ``convert_plan`` will
         prepare schemas lazily).
 
-        Otherwise we walk *plan*'s supported tables and confirm:
+        Otherwise we confirm every staging user ``DMP_<schema>`` exists in
+        ``dba_users``.  A missing user means the container was restarted
+        between inspect and convert; we fail fast with a remediation hint
+        ("re-run inspect").
 
-        1. The staging user ``DMP_<schema>`` exists in ``dba_users``.
-        2. The staging table ``DMP_<schema>.<table>`` exists in ``dba_tables``.
-
-        Either failure raises :class:`ValueError` with a remediation hint
-        ("re-run inspect") so we fail fast at the start of convert rather
-        than partway through with a cryptic Oracle error.
+        Missing staging *tables* (with the users present) are NOT checked
+        here — ``convert_plan`` calls :meth:`validate_staging_tables`, which
+        filters absent tables out of the plan and warns about them.  This
+        method only owns the user-level fail-fast so the two passes don't
+        each query ``dba_tables`` for every supported table.
         """
         if not self.metadata_imported:
             return
@@ -476,27 +525,18 @@ class StagingExecutor:
         if not supported:
             return
         missing_users: set[str] = set()
-        missing_tables: list[str] = []
-        with self._connect() as conn:
+        with self._connect() as conn, conn.cursor() as cursor:
             wanted_users = {self._stage_schema_for(tp.schema) for tp in supported}
-            with conn.cursor() as cursor:
-                # Bind variables would require dynamic IN-list construction;
-                # validate per-name with a single small query each so the
-                # connection round-trips stay bounded by |wanted_users|.
-                for user in sorted(wanted_users):
-                    cursor.execute(
-                        "SELECT 1 FROM dba_users WHERE username = :u",
-                        {"u": user},
-                    )
-                    if cursor.fetchone() is None:
-                        missing_users.add(user)
-            for tp in supported:
-                stage_schema = self._stage_schema_for(tp.schema)
-                if stage_schema in missing_users:
-                    missing_tables.append(f"{stage_schema}.{tp.table}")
-                    continue
-                if not table_exists(conn, stage_schema, tp.table):
-                    missing_tables.append(f"{stage_schema}.{tp.table}")
+            # Bind variables would require dynamic IN-list construction;
+            # validate per-name with a single small query each so the
+            # connection round-trips stay bounded by |wanted_users|.
+            for user in sorted(wanted_users):
+                cursor.execute(
+                    "SELECT 1 FROM dba_users WHERE username = :u",
+                    {"u": user},
+                )
+                if cursor.fetchone() is None:
+                    missing_users.add(user)
         if missing_users:
             # Missing staging *users* really do indicate stale state — the
             # container was likely restarted between inspect and convert.
@@ -505,19 +545,6 @@ class StagingExecutor:
                 "(missing staging users: "
                 + ", ".join(sorted(missing_users))
                 + "). Re-run inspect before convert."
-            )
-        if missing_tables:
-            # Missing staging *tables* (with the users present) usually
-            # means the source dump's metadata import skipped them, which
-            # is expected for legacy ``exp`` dumps that couldn't serialise
-            # IDENTITY / JSON / object-type columns.  Log and continue —
-            # the per-table validation later in convert_plan filters them
-            # out of the conversion plan.
-            LOGGER.warning(
-                "Container is missing %d staging table(s) recorded in the "
-                "manifest; these will be skipped during convert: %s",
-                len(missing_tables),
-                ", ".join(missing_tables),
             )
 
     def _import_chunk_with_recovery(
@@ -623,6 +650,22 @@ class StagingExecutor:
         with self._connect() as conn:
             return count_rows(conn, stage_schema, table)
 
+    def _cached_stage_metadata(
+        self, conn: oracledb.Connection, stage_schema: str, table: str
+    ) -> TableMetadata:
+        """Return staging-table metadata, discovering it once per table.
+
+        ``export_stage_table`` is called per chunk; the underlying staging
+        structure is identical across a table's chunks, so we memoise the
+        8-query discovery on ``(stage_schema, table)``.
+        """
+        key = (stage_schema, table)
+        cached = self._table_metadata_cache.get(key)
+        if cached is None:
+            cached = discover_table_metadata(conn, stage_schema, table)
+            self._table_metadata_cache[key] = cached
+        return cached
+
     def export_stage_table(
         self,
         *,
@@ -642,7 +685,7 @@ class StagingExecutor:
             output_format=self.output_format,
         )
         with self._connect() as conn:
-            metadata = discover_table_metadata(conn, stage_schema, table)
+            metadata = self._cached_stage_metadata(conn, stage_schema, table)
             imported_rows = count_rows(
                 conn,
                 stage_schema,
@@ -784,6 +827,7 @@ class StagingExecutor:
         table_plans: list[TablePlan],
         output_dir: Path,
         state_store: StateStore | None,
+        prefetched: dict[tuple[str, str], ChunkState] | None = None,
     ) -> tuple[dict[str, list[ChunkConversionResult]], list[tuple[TablePlan, ChunkPlan]]]:
         """Separate already-completed chunks (rehydrated from state) from pending work."""
         chunk_results: dict[str, list[ChunkConversionResult]] = {
@@ -792,7 +836,7 @@ class StagingExecutor:
         pending: list[tuple[TablePlan, ChunkPlan]] = []
         for tp in table_plans:
             for chunk in tp.chunks:
-                state = state_store.get(tp.qualified_name, chunk.name) if state_store else None
+                state = self._chunk_state(state_store, prefetched, tp.qualified_name, chunk.name)
                 if state and state.status == "completed":
                     chunk_results[tp.qualified_name].append(
                         ChunkConversionResult(
@@ -821,12 +865,14 @@ class StagingExecutor:
                 key = (stage_schema, tp.table)
                 if key not in truncated:
                     truncate_table(conn, stage_schema, tp.table)
+                    self._table_metadata_cache.pop(key, None)
                     truncated.add(key)
 
     def _clear_modern_stage_tables_for_plan(
         self,
         supported: list[TablePlan],
         state_store: StateStore | None,
+        prefetched: dict[tuple[str, str], ChunkState] | None = None,
     ) -> None:
         """Pre-clear every staging table with at least one pending chunk.
 
@@ -844,7 +890,7 @@ class StagingExecutor:
         targets: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for tp in supported:
-            if not self._table_has_pending_chunks(tp, state_store):
+            if not self._table_has_pending_chunks(tp, state_store, prefetched):
                 continue
             key = (self._stage_schema_for(tp.schema), tp.table)
             if key in seen:
@@ -855,16 +901,37 @@ class StagingExecutor:
             return
         self._delete_from_staging_tables(targets)
 
+    def _chunk_state(
+        self,
+        state_store: StateStore | None,
+        prefetched: dict[tuple[str, str], ChunkState] | None,
+        qualified_name: str,
+        chunk_name: str,
+    ) -> ChunkState | None:
+        """Resolve a chunk's state from the prefetched snapshot or live store.
+
+        When *prefetched* is provided it is authoritative (one bulk
+        ``SELECT`` taken at the start of convert); otherwise fall back to a
+        live per-chunk ``state_store.get`` so callers without a snapshot
+        still work.
+        """
+        if prefetched is not None:
+            return prefetched.get((qualified_name, chunk_name))
+        if state_store is not None:
+            return state_store.get(qualified_name, chunk_name)
+        return None
+
     def _table_has_pending_chunks(
         self,
         tp: TablePlan,
         state_store: StateStore | None,
+        prefetched: dict[tuple[str, str], ChunkState] | None = None,
     ) -> bool:
         """Return True if any chunk on *tp* is not already ``completed``."""
-        if state_store is None:
+        if state_store is None and prefetched is None:
             return True
         for chunk in tp.chunks:
-            existing = state_store.get(tp.qualified_name, chunk.name)
+            existing = self._chunk_state(state_store, prefetched, tp.qualified_name, chunk.name)
             if existing is None or existing.status != "completed":
                 return True
         return False
@@ -911,6 +978,8 @@ class StagingExecutor:
         so an FK violation later doesn't roll the deletes back.
         """
         LOGGER.info("Pre-clearing %d staging table(s) before APPEND batch", len(targets))
+        for key in targets:
+            self._table_metadata_cache.pop(key, None)
         with self._connect() as conn:
             for pass_num in range(1, 4):
                 remaining: list[tuple[str, str]] = []
@@ -1025,6 +1094,7 @@ class StagingExecutor:
         table_plans: list[TablePlan],
         output_dir: Path,
         state_store: StateStore | None = None,
+        prefetched: dict[tuple[str, str], ChunkState] | None = None,
     ) -> list[TableConversionResult]:
         seen_schemas: set[str] = set()
         for tp in table_plans:
@@ -1032,7 +1102,9 @@ class StagingExecutor:
                 self.prepare_stage_schema(tp.schema)
                 seen_schemas.add(tp.schema)
 
-        chunk_results, pending = self._split_batch_pending(table_plans, output_dir, state_store)
+        chunk_results, pending = self._split_batch_pending(
+            table_plans, output_dir, state_store, prefetched
+        )
 
         if not pending:
             return [
@@ -1045,12 +1117,18 @@ class StagingExecutor:
             ]
 
         if state_store:
-            for tp, chunk in pending:
-                state_store.upsert(ChunkState(tp.qualified_name, chunk.name, "running"))
+            with state_store.deferred_commit():
+                for tp, chunk in pending:
+                    state_store.upsert(ChunkState(tp.qualified_name, chunk.name, "running"))
 
         workflow = self._require_workflow()
         if workflow.dump_format == DumpFormat.LEGACY:
-            self._truncate_legacy_stage_tables(pending)
+            with _phase_timer(
+                "preclear_legacy_batch",
+                dump_format="legacy",
+                chunks=len(pending),
+            ):
+                self._truncate_legacy_stage_tables(pending)
         # Modern dumps: pre-clear was already done cross-batch in
         # convert_plan to handle reference-partition FK chains; nothing
         # to do here.
@@ -1068,45 +1146,66 @@ class StagingExecutor:
         ]
 
         try:
-            workflow.import_chunks_batch(import_specs)
+            with _phase_timer(
+                "import_batch",
+                dump_format=workflow.dump_format.value,
+                chunks=len(import_specs),
+            ):
+                workflow.import_chunks_batch(import_specs)
         except Exception as exc:
             self._mark_pending_failed(pending, state_store, exc)
             raise
 
-        for tp, chunk in pending:
-            try:
-                result = self._export_one_batched_chunk(tp, chunk, output_dir, state_store)
-                chunk_results[tp.qualified_name].append(result)
-                if chunk.subpartition_name:
-                    LOGGER.info(
-                        "Converted %s.%s subpartition %s/%s: %d rows",
-                        tp.schema,
-                        tp.table,
-                        chunk.partition_name,
-                        chunk.subpartition_name,
-                        result.output_rows,
+        # Batch every per-chunk state upsert into one commit for this batch
+        # rather than fsync-ing per chunk.  Resumability granularity drops
+        # to per-batch, which is safe because re-import is idempotent.
+        export_commit_ctx = (
+            state_store.deferred_commit() if state_store is not None else nullcontext()
+        )
+        with export_commit_ctx:
+            for tp, chunk in pending:
+                try:
+                    with _phase_timer(
+                        "export_chunk",
+                        dump_format=workflow.dump_format.value,
+                        table=tp.qualified_name,
+                        chunk=chunk.name,
+                        is_subpartition=bool(chunk.subpartition_name),
+                    ):
+                        result = self._export_one_batched_chunk(
+                            tp, chunk, output_dir, state_store
+                        )
+                    chunk_results[tp.qualified_name].append(result)
+                    if chunk.subpartition_name:
+                        LOGGER.info(
+                            "Converted %s.%s subpartition %s/%s: %d rows",
+                            tp.schema,
+                            tp.table,
+                            chunk.partition_name,
+                            chunk.subpartition_name,
+                            result.output_rows,
+                        )
+                    elif chunk.partition_name:
+                        LOGGER.info(
+                            "Converted %s.%s partition %s: %d rows",
+                            tp.schema,
+                            tp.table,
+                            chunk.partition_name,
+                            result.output_rows,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    # A per-chunk failure (bad type, ORA-00932 on an exotic
+                    # column, FK violation on a reference-partitioned import)
+                    # is recorded in state by ``_export_one_batched_chunk``
+                    # but must NOT abort the whole batch — other tables in
+                    # the batch are independent and should still be exported.
+                    # The failure is reflected later in the conversion report.
+                    LOGGER.warning(
+                        "Chunk export failed for %s %s: %s; continuing with rest of batch",
+                        tp.qualified_name,
+                        chunk.name,
+                        exc,
                     )
-                elif chunk.partition_name:
-                    LOGGER.info(
-                        "Converted %s.%s partition %s: %d rows",
-                        tp.schema,
-                        tp.table,
-                        chunk.partition_name,
-                        result.output_rows,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                # A per-chunk failure (bad type, ORA-00932 on an exotic
-                # column, FK violation on a reference-partitioned import)
-                # is recorded in state by ``_export_one_batched_chunk`` but
-                # must NOT abort the whole batch — other tables in the
-                # batch are independent and should still be exported.  The
-                # failure is reflected later in the conversion report.
-                LOGGER.warning(
-                    "Chunk export failed for %s %s: %s; continuing with rest of batch",
-                    tp.qualified_name,
-                    chunk.name,
-                    exc,
-                )
 
         return [
             TableConversionResult(
@@ -1142,13 +1241,23 @@ class StagingExecutor:
         if workflow_from_inspect:
             supported = self.validate_staging_tables(supported)
 
+        # Take one snapshot of all chunk states up front and reuse it for
+        # the pre-clear pending check and every batch's pending split,
+        # instead of issuing a per-chunk SQLite read in nested loops.
+        prefetched = state_store.snapshot() if state_store is not None else None
+
         # Pre-clear all supported staging tables that have at least one
         # pending chunk.  Doing this once, cross-batch, handles
         # reference-partitioned FK chains where the parent is in batch N
         # and the child is in batch N+1 — clearing the parent first
         # would fail (ORA-02292) because the child still has rows.
         if self._workflow and self._workflow.dump_format != DumpFormat.LEGACY:
-            self._clear_modern_stage_tables_for_plan(supported, state_store)
+            with _phase_timer(
+                "preclear_modern_plan",
+                dump_format="datapump",
+                tables=len(supported),
+            ):
+                self._clear_modern_stage_tables_for_plan(supported, state_store, prefetched)
 
         plan_started_at = datetime.now(UTC)
         results: list[TableConversionResult] = []
@@ -1161,7 +1270,7 @@ class StagingExecutor:
                 batch_start + len(batch),
                 len(supported),
             )
-            batch_results = self.convert_table_batch(batch, output_dir, state_store)
+            batch_results = self.convert_table_batch(batch, output_dir, state_store, prefetched)
             for tp, table_result in zip(batch, batch_results, strict=True):
                 LOGGER.info(
                     "Converted %s.%s: %d rows",
