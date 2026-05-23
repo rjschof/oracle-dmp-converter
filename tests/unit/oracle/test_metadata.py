@@ -122,6 +122,7 @@ class TestDiscoverTableMetadata:
         table_stats=None,
         external_row=None,
         partition_rows=None,
+        subpartition_rows=None,
         pk_rows=None,
         unique_rows=None,
     ) -> MagicMock:
@@ -137,6 +138,7 @@ class TestDiscoverTableMetadata:
         cursor.fetchall.side_effect = [
             col_rows,
             partition_rows or [],
+            subpartition_rows or [],
             pk_rows or [("ID",)],
             unique_rows or [],
         ]
@@ -180,11 +182,31 @@ class TestDiscoverTableMetadata:
         assert len(meta.partitions) == 2
         assert meta.partitions[0].name == "P1"
         assert meta.partitions[1].name == "P2"
+        assert meta.partitions[0].subpartitions == ()
+
+    def test_composite_subpartitions_attached_to_parent(self) -> None:
+        """ALL_TAB_SUBPARTITIONS rows are grouped by parent partition."""
+        cursor = self._setup_cursor(
+            partition_rows=[("P_2024", 1), ("P_2025", 2)],
+            subpartition_rows=[
+                ("P_2024", "P_2024_SP1", 1),
+                ("P_2024", "P_2024_SP2", 2),
+                ("P_2025", "P_2025_SP1", 1),
+                ("P_2025", "P_2025_SP2", 2),
+            ],
+        )
+        conn = _make_conn(cursor)
+        meta = discover_table_metadata(conn, "FINANCE", "TXN_DETAILS")
+        assert len(meta.partitions[0].subpartitions) == 2
+        assert meta.partitions[0].subpartitions[0].name == "P_2024_SP1"
+        assert meta.partitions[0].subpartitions[0].parent_partition == "P_2024"
+        assert meta.partitions[1].subpartitions[1].name == "P_2025_SP2"
 
     def test_no_row_count_when_stats_none(self) -> None:
         cursor = _make_cursor()
         cursor.fetchall.side_effect = [
             [_col_row("ID", "NUMBER", 1, nullable="N", precision=10, scale=0)],
+            [],
             [],
             [],
             [],
@@ -205,6 +227,7 @@ class TestDiscoverTableMetadata:
             [],
             [],
             [],
+            [],
         ]
         # _estimated_segment_bytes raises ORA-942 → returns None
         cursor.execute.side_effect = [
@@ -213,6 +236,7 @@ class TestDiscoverTableMetadata:
             None,  # ALL_TABLES
             None,  # ALL_EXTERNAL_TABLES probe
             None,  # ALL_TAB_PARTITIONS
+            None,  # ALL_TAB_SUBPARTITIONS
             None,  # ALL_CONSTRAINTS PK
             None,  # ALL_CONSTRAINTS UK
         ]

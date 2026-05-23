@@ -134,8 +134,8 @@ class TestImportChunksBatch:
         wf = _make_workflow(tmp_path)
         wf.import_chunks_batch(
             [
-                ("SRC", "STAGE", "ORDERS", "whole", None),
-                ("SRC", "STAGE", "ITEMS", "whole", None),
+                ("SRC", "STAGE", "ORDERS", "whole", None, None),
+                ("SRC", "STAGE", "ITEMS", "whole", None, None),
             ]
         )
         wf._convert_runner.run_batch_impdp.assert_called_once()
@@ -144,8 +144,8 @@ class TestImportChunksBatch:
         wf = _make_workflow(tmp_path)
         wf.import_chunks_batch(
             [
-                ("SRC", "STAGE1", "T1", "whole", None),
-                ("SRC", "STAGE1", "T2", "whole", None),
+                ("SRC", "STAGE1", "T1", "whole", None, None),
+                ("SRC", "STAGE1", "T2", "whole", None, None),
             ]
         )
         call_args = wf._convert_runner.run_batch_impdp.call_args[0][0]

@@ -3,6 +3,7 @@ from oracle_dmp_converter.models import (
     ColumnMetadata,
     DumpFormat,
     PartitionMetadata,
+    SubpartitionMetadata,
     TableMetadata,
     TableStrategy,
 )
@@ -79,6 +80,60 @@ def test_unrecognized_strategy_returns_unsupported() -> None:
     assert plan.strategy == TableStrategy.UNSUPPORTED
     assert plan.reason is not None
     assert "range" in plan.reason
+
+
+def test_composite_partitions_emit_per_subpartition_chunks() -> None:
+    """Composite (RANGE-HASH etc.) partitioning emits one chunk per subpartition."""
+    table = TableMetadata(
+        schema="FINANCE",
+        name="TXN_DETAILS",
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
+        partitions=(
+            PartitionMetadata(
+                "P_2024",
+                1,
+                subpartitions=(
+                    SubpartitionMetadata("P_2024_SP1", 1, "P_2024"),
+                    SubpartitionMetadata("P_2024_SP2", 2, "P_2024"),
+                ),
+            ),
+            PartitionMetadata(
+                "P_2025",
+                2,
+                subpartitions=(
+                    SubpartitionMetadata("P_2025_SP1", 1, "P_2025"),
+                    SubpartitionMetadata("P_2025_SP2", 2, "P_2025"),
+                ),
+            ),
+        ),
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.PARTITION
+    assert len(plan.chunks) == 4
+    names = [chunk.name for chunk in plan.chunks]
+    assert names == [
+        "subpartition-00001-00001-P_2024-P_2024_SP1",
+        "subpartition-00001-00002-P_2024-P_2024_SP2",
+        "subpartition-00002-00001-P_2025-P_2025_SP1",
+        "subpartition-00002-00002-P_2025-P_2025_SP2",
+    ]
+    for chunk in plan.chunks:
+        assert chunk.partition_name is not None
+        assert chunk.subpartition_name is not None
+
+
+def test_partition_without_subpartitions_uses_partition_chunk() -> None:
+    """A partition with an empty subpartitions tuple falls back to a partition chunk."""
+    table = TableMetadata(
+        schema="SALES",
+        name="FACT",
+        columns=(ColumnMetadata("ID", "NUMBER", 1),),
+        partitions=(PartitionMetadata("P1", 1, subpartitions=()),),
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert len(plan.chunks) == 1
+    assert plan.chunks[0].name == "partition-00001-P1"
+    assert plan.chunks[0].subpartition_name is None
 
 
 def test_chunk_names_are_zero_padded() -> None:

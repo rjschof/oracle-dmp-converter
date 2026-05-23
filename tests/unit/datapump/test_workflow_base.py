@@ -26,8 +26,18 @@ class _ConcreteWorkflow(DumpWorkflow):
     def import_metadata(self, source_schema, stage_schema, table):
         pass
 
-    def import_chunk(self, source_schema, stage_schema, table, chunk_name, partition_name):
-        self._recorded.append((source_schema, stage_schema, table, chunk_name, partition_name))
+    def import_chunk(
+        self,
+        source_schema,
+        stage_schema,
+        table,
+        chunk_name,
+        partition_name,
+        subpartition_name=None,
+    ):
+        self._recorded.append(
+            (source_schema, stage_schema, table, chunk_name, partition_name, subpartition_name)
+        )
 
     def __init__(self):
         self._recorded = []
@@ -37,8 +47,9 @@ class TestDefaultImportChunksBatch:
     def test_falls_back_to_individual_import_chunks(self) -> None:
         wf = _ConcreteWorkflow()
         chunks = [
-            ("S1", "STAGE1", "T1", "whole", None),
-            ("S2", "STAGE2", "T2", "whole", "P1"),
+            ("S1", "STAGE1", "T1", "whole", None, None),
+            ("S2", "STAGE2", "T2", "whole", "P1", None),
+            ("S3", "STAGE3", "T3", "subpartition-1-1-P_A-SP1", "P_A", "SP1"),
         ]
         wf.import_chunks_batch(chunks)
         assert wf._recorded == chunks

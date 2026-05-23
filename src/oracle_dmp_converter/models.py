@@ -119,16 +119,37 @@ class ColumnMetadata:
 
 
 @dataclass(frozen=True)
+class SubpartitionMetadata:
+    """Metadata for a single Oracle table subpartition.
+
+    Oracle composite partitioning is exactly two levels (no sub-subpartitions),
+    so this is the leaf granularity reported by ``ALL_TAB_SUBPARTITIONS``.
+
+    Attributes:
+        name: Subpartition name.
+        position: 1-based ordinal position within the parent partition.
+        parent_partition: Name of the partition that owns this subpartition.
+    """
+
+    name: str
+    position: int
+    parent_partition: str
+
+
+@dataclass(frozen=True)
 class PartitionMetadata:
     """Metadata for a single Oracle table partition.
 
     Attributes:
         name: Partition name as reported by ``ALL_TAB_PARTITIONS``.
         position: 1-based ordinal position of the partition within the table.
+        subpartitions: Ordered tuple of subpartitions belonging to this
+            partition; empty for non-composite tables.
     """
 
     name: str
     position: int
+    subpartitions: tuple[SubpartitionMetadata, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -213,6 +234,10 @@ class ChunkPlan:
     name: str
     strategy: TableStrategy
     partition_name: str | None = None
+    subpartition_name: str | None = None
+    """Oracle subpartition name for subpartition-drill-down chunks; ``None``
+    for whole-table and partition-only chunks. When set, the exporter and
+    importer filter rows with a bare ``SUBPARTITION (sub_name)`` clause."""
 
 
 @dataclass(frozen=True)

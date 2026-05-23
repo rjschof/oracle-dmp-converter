@@ -111,11 +111,19 @@ class _ProbedModernWorkflow(DumpWorkflow):
         table: str,
         chunk_name: str,
         partition_name: str | None,
+        subpartition_name: str | None = None,
     ) -> None:
-        self._inner.import_chunk(source_schema, stage_schema, table, chunk_name, partition_name)
+        self._inner.import_chunk(
+            source_schema,
+            stage_schema,
+            table,
+            chunk_name,
+            partition_name,
+            subpartition_name,
+        )
 
     def import_chunks_batch(
         self,
-        chunks: list[tuple[str, str, str, str, str | None]],
+        chunks: list[tuple[str, str, str, str, str | None, str | None]],
     ) -> None:
         self._inner.import_chunks_batch(chunks)

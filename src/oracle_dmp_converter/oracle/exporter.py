@@ -256,6 +256,7 @@ def export_table(
     column_overrides: dict[str, ColumnOverride] | None = None,
     batch_size: int = 10_000,
     partition_name: str | None = None,
+    subpartition_name: str | None = None,
 ) -> ExportResult:
     """Export *table_name* from *conn* to *output_path* in *output_format*.
 
@@ -267,6 +268,10 @@ def export_table(
     ``FROM`` expression.  This is used by the batch-import path where the
     staging table contains all partitions' rows after a single ``impdp``
     call and each chunk must still produce a partition-scoped output file.
+
+    When *subpartition_name* is provided, a bare ``SUBPARTITION (name)``
+    clause is used instead — subpartition names are unique within a table,
+    so the parent ``PARTITION (...)`` qualifier is unnecessary.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     column_overrides = column_overrides or {}
@@ -277,7 +282,9 @@ def export_table(
         for column in columns
     )
     table_ref = oracle_qualified_name(schema_name, table_name)
-    if partition_name:
+    if subpartition_name:
+        table_ref = f"{table_ref} SUBPARTITION ({oracle_identifier(subpartition_name)})"
+    elif partition_name:
         table_ref = f"{table_ref} PARTITION ({oracle_identifier(partition_name)})"
     sql = f"SELECT {select_list} FROM {table_ref}"
     LOGGER.debug("export_table SQL: %s", sql)

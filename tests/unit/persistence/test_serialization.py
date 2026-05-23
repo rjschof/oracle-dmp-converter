@@ -11,15 +11,18 @@ from oracle_dmp_converter.models import (
     DumpFormat,
     DumpManifest,
     PartitionMetadata,
+    SubpartitionMetadata,
     TableMetadata,
     TablePlan,
     TableStrategy,
 )
 from oracle_dmp_converter.persistence.serialization import (
+    chunk_plan_to_dict,
     column_to_dict,
     load_manifest,
     load_plan,
     load_session,
+    partition_to_dict,
     save_manifest,
     save_plan,
     save_session,
@@ -332,6 +335,121 @@ def test_manifest_round_trip_carries_new_column_fields(tmp_path: Path) -> None:
     assert table.columns[0].comment == "primary key"
     assert table.columns[1].data_type_owner == "FINANCE"
     assert table.columns[2].hidden is True
+
+
+def test_plan_round_trip_with_subpartitions(tmp_path: Path) -> None:
+    """Plans containing subpartition-drill-down chunks round-trip exactly."""
+    plan = ConversionPlan(
+        dump_paths=("/tmp/full.dmp",),
+        oracle_image="gvenzl/oracle-free:23-faststart",
+        container_runtime="docker",
+        tables=(
+            TablePlan(
+                schema="FINANCE",
+                table="TXN_DETAILS",
+                strategy=TableStrategy.PARTITION,
+                chunks=(
+                    ChunkPlan(
+                        name="subpartition-00001-00001-P_2024-P_2024_SP1",
+                        strategy=TableStrategy.PARTITION,
+                        partition_name="P_2024",
+                        subpartition_name="P_2024_SP1",
+                    ),
+                    ChunkPlan(
+                        name="subpartition-00001-00002-P_2024-P_2024_SP2",
+                        strategy=TableStrategy.PARTITION,
+                        partition_name="P_2024",
+                        subpartition_name="P_2024_SP2",
+                    ),
+                ),
+            ),
+        ),
+    )
+    path = tmp_path / "plan_subparts.yaml"
+    save_plan(path, plan)
+    loaded = load_plan(path)
+    assert loaded == plan
+    assert loaded.tables[0].chunks[0].subpartition_name == "P_2024_SP1"
+
+
+def test_manifest_round_trip_with_subpartitions(tmp_path: Path) -> None:
+    """Manifests carry PartitionMetadata.subpartitions through serialisation."""
+    manifest = DumpManifest(
+        dump_paths=("/tmp/composite.dmp",),
+        tables=(
+            TableMetadata(
+                schema="FINANCE",
+                name="TXN_DETAILS",
+                columns=(ColumnMetadata("ID", "NUMBER", 1),),
+                partitions=(
+                    PartitionMetadata(
+                        name="P_2024",
+                        position=1,
+                        subpartitions=(
+                            SubpartitionMetadata("P_2024_SP1", 1, "P_2024"),
+                            SubpartitionMetadata("P_2024_SP2", 2, "P_2024"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    path = tmp_path / "manifest_composite.json"
+    save_manifest(path, manifest)
+    loaded = load_manifest(path)
+    assert loaded == manifest
+    assert loaded.tables[0].partitions[0].subpartitions[0].name == "P_2024_SP1"
+
+
+def test_chunk_plan_dict_omits_subpartition_name_when_unset() -> None:
+    """ChunkPlan serialisation stays compact for non-subpartition chunks."""
+    chunk = ChunkPlan(
+        name="partition-00001-P1",
+        strategy=TableStrategy.PARTITION,
+        partition_name="P1",
+    )
+    payload = chunk_plan_to_dict(chunk)
+    assert "subpartition_name" not in payload
+
+
+def test_partition_dict_omits_subpartitions_when_empty() -> None:
+    """PartitionMetadata serialisation stays compact for non-composite partitions."""
+    partition = PartitionMetadata(name="P1", position=1)
+    payload = partition_to_dict(partition)
+    assert "subpartitions" not in payload
+
+
+def test_plan_loads_old_yaml_without_subpartition_name(tmp_path: Path) -> None:
+    """Plan YAML written before the subpartition_name field still loads."""
+    payload = {
+        "version": 1,
+        "dump_format": "datapump",
+        "dump_paths": ["/tmp/old.dmp"],
+        "oracle_image": "gvenzl/oracle-free:23-faststart",
+        "tables": [
+            {
+                "schema": "SRC",
+                "table": "FACT",
+                "strategy": "partition",
+                "chunks": [
+                    {
+                        "name": "partition-00001-P1",
+                        "strategy": "partition",
+                        "partition_name": "P1",
+                    },
+                ],
+                "reason": None,
+                "warnings": [],
+                "extra": {},
+            },
+        ],
+    }
+    path = tmp_path / "old_plan.yaml"
+    path.write_text(yaml.safe_dump(payload))
+    loaded = load_plan(path)
+    chunk = loaded.tables[0].chunks[0]
+    assert chunk.partition_name == "P1"
+    assert chunk.subpartition_name is None
 
 
 def test_table_metadata_dict_omits_default_fields() -> None:

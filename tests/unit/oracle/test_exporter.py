@@ -243,6 +243,34 @@ def test_export_table_sql_with_partition(tmp_path: Path) -> None:
     assert sql_upper.index("PARTITION") > from_idx
 
 
+def test_export_table_sql_with_subpartition(tmp_path: Path) -> None:
+    """With subpartition_name the FROM clause uses bare SUBPARTITION (name)."""
+    sqls: list[str] = []
+    conn = _make_mock_conn(sqls)
+    mock_writer = MagicMock()
+    mock_writer.write_empty = MagicMock()
+    mock_writer.close = MagicMock()
+
+    with patch("oracle_dmp_converter.oracle.exporter.make_writer", return_value=mock_writer):
+        export_table(
+            conn,
+            schema_name="DMP_FINANCE",
+            table_name="TXN_DETAILS",
+            columns=_simple_columns(),
+            output_path=tmp_path / "out.parquet",
+            output_format=OutputFormat.PARQUET,
+            partition_name="P_2024",
+            subpartition_name="P_2024_SP3",
+        )
+
+    assert len(sqls) == 1
+    sql_upper = sqls[0].upper()
+    assert "SUBPARTITION" in sql_upper
+    assert "P_2024_SP3" in sqls[0]
+    # Bare SUBPARTITION clause: parent PARTITION (P_2024) must not appear.
+    assert " PARTITION (" not in sql_upper
+
+
 # ---------------------------------------------------------------------------
 # _read_lob
 # ---------------------------------------------------------------------------

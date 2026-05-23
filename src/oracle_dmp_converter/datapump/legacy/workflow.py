@@ -260,13 +260,14 @@ class LegacyDumpWorkflow(DumpWorkflow):
         table: str,
         chunk_name: str,
         partition_name: str | None,
+        subpartition_name: str | None = None,
     ) -> None:
         """Import one chunk of table data into the staging schema.
 
         Legacy ``imp`` does not support ``QUERY=`` or partition-level imports;
-        ``chunk_name`` and ``partition_name`` are ignored and the whole table
-        is always imported.  The planner must not produce ``HASH`` or
-        ``PARTITION`` chunks for legacy dumps.
+        ``chunk_name``, ``partition_name``, and ``subpartition_name`` are
+        ignored and the whole table is always imported.  The planner must not
+        produce ``HASH`` or ``PARTITION`` chunks for legacy dumps.
         """
         LOGGER.debug(
             "Importing legacy chunk %s for %s.%s -> %s",
@@ -291,7 +292,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
 
     def import_chunks_batch(
         self,
-        chunks: list[tuple[str, str, str, str, str | None]],
+        chunks: list[tuple[str, str, str, str, str | None, str | None]],
     ) -> None:
         """Import multiple tables using as few ``imp`` invocations as possible.
 
@@ -301,14 +302,14 @@ class LegacyDumpWorkflow(DumpWorkflow):
         issued per distinct schema pair, with all table names for that pair
         combined into the ``TABLES=`` list.
 
-        ``chunk_name`` and ``partition_name`` are ignored — legacy ``imp`` has
-        no ``QUERY=`` support.
+        ``chunk_name``, ``partition_name``, and ``subpartition_name`` are
+        ignored — legacy ``imp`` has no ``QUERY=`` support.
         """
         if not chunks:
             return
         # Group tables by (source_schema, stage_schema), preserving order.
         schema_groups: dict[tuple[str, str], list[str]] = {}
-        for source_schema, stage_schema, table, _chunk_name, _partition_name in chunks:
+        for source_schema, stage_schema, table, _chunk_name, _partition_name, _sub in chunks:
             key = (source_schema, stage_schema)
             schema_groups.setdefault(key, []).append(table)
 

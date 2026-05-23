@@ -55,21 +55,38 @@ class DumpWorkflow(ABC):
         table: str,
         chunk_name: str,
         partition_name: str | None,
+        subpartition_name: str | None = None,
     ) -> None:
         """Import one logical chunk of *table* data into *stage_schema*."""
 
     def import_chunks_batch(
         self,
-        chunks: list[tuple[str, str, str, str, str | None]],
+        chunks: list[tuple[str, str, str, str, str | None, str | None]],
     ) -> None:
         """Import multiple chunks in a single Oracle tool invocation.
 
-        The default implementation falls back to one
-        :meth:`import_chunk` call per entry; concrete workflows override
-        this to combine all specs into a single ``impdp``/``imp`` invocation.
+        Each entry is ``(source_schema, stage_schema, table, chunk_name,
+        partition_name, subpartition_name)``. The default implementation
+        falls back to one :meth:`import_chunk` call per entry; concrete
+        workflows override this to combine all specs into a single
+        ``impdp``/``imp`` invocation.
         """
-        for source_schema, stage_schema, table, chunk_name, partition_name in chunks:
-            self.import_chunk(source_schema, stage_schema, table, chunk_name, partition_name)
+        for (
+            source_schema,
+            stage_schema,
+            table,
+            chunk_name,
+            partition_name,
+            subpartition_name,
+        ) in chunks:
+            self.import_chunk(
+                source_schema,
+                stage_schema,
+                table,
+                chunk_name,
+                partition_name,
+                subpartition_name,
+            )
 
 
 @dataclass(frozen=True)

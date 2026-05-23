@@ -266,6 +266,25 @@ def test_modern_plan(shared_work: SimpleNamespace) -> None:
             f"{table_name}: expected PARTITION strategy, got {by_table[table_name].strategy}"
         )
 
+    # TRANSACTION_DETAILS is RANGE-HASH composite (3 range × 4 hash = 12
+    # subpartitions). With subpartition drill-down the planner emits one
+    # ChunkPlan per subpartition, each carrying subpartition_name and the
+    # ``subpartition-PPPPP-SSSSS-...`` naming convention.
+    txn_details = by_table["TRANSACTION_DETAILS"]
+    assert len(txn_details.chunks) == 12, (
+        f"TRANSACTION_DETAILS: expected 12 subpartition chunks, got {len(txn_details.chunks)}"
+    )
+    for chunk in txn_details.chunks:
+        assert chunk.subpartition_name is not None, (
+            f"TRANSACTION_DETAILS chunk {chunk.name} missing subpartition_name"
+        )
+        assert chunk.partition_name is not None, (
+            f"TRANSACTION_DETAILS chunk {chunk.name} missing partition_name"
+        )
+        assert chunk.name.startswith("subpartition-"), (
+            f"TRANSACTION_DETAILS chunk name should start with 'subpartition-': {chunk.name}"
+        )
+
 
 def test_modern_convert(shared_work: SimpleNamespace, tmp_path: Path) -> None:
     """convert subcommand: produces correct Parquet output and conversion report."""

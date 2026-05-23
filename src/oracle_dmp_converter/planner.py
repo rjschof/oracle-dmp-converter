@@ -158,19 +158,37 @@ def plan_table(
     LOGGER.debug(
         "%s.%s: strategy=partition (%d partitions)", table.schema, table.name, len(table.partitions)
     )
-    partition_chunks = tuple(
-        ChunkPlan(
-            name=f"partition-{partition.position:05d}-{partition.name}",
-            strategy=TableStrategy.PARTITION,
-            partition_name=partition.name,
-        )
-        for partition in table.partitions
-    )
+    chunks: list[ChunkPlan] = []
+    for partition in table.partitions:
+        if partition.subpartitions:
+            # Composite-partitioned table: emit one chunk per physical
+            # subpartition so import/export operations match the underlying
+            # storage granularity.
+            for sub in partition.subpartitions:
+                chunks.append(
+                    ChunkPlan(
+                        name=(
+                            f"subpartition-{partition.position:05d}-{sub.position:05d}"
+                            f"-{partition.name}-{sub.name}"
+                        ),
+                        strategy=TableStrategy.PARTITION,
+                        partition_name=partition.name,
+                        subpartition_name=sub.name,
+                    )
+                )
+        else:
+            chunks.append(
+                ChunkPlan(
+                    name=f"partition-{partition.position:05d}-{partition.name}",
+                    strategy=TableStrategy.PARTITION,
+                    partition_name=partition.name,
+                )
+            )
     return TablePlan(
         schema=table.schema,
         table=table.name,
         strategy=TableStrategy.PARTITION,
-        chunks=partition_chunks,
+        chunks=tuple(chunks),
     )
 
 

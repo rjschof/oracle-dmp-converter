@@ -227,9 +227,9 @@ class TestImportChunksBatch:
         wf = _make_workflow(tmp_path)
         wf.import_chunks_batch(
             [
-                ("SRC1", "STAGE1", "T1", "whole", None),
-                ("SRC1", "STAGE1", "T2", "whole", None),
-                ("SRC2", "STAGE2", "T3", "whole", None),
+                ("SRC1", "STAGE1", "T1", "whole", None, None),
+                ("SRC1", "STAGE1", "T2", "whole", None, None),
+                ("SRC2", "STAGE2", "T3", "whole", None, None),
             ]
         )
         assert wf._convert_runner.run_imp.call_count == 2
@@ -238,8 +238,8 @@ class TestImportChunksBatch:
         wf = _make_workflow(tmp_path)
         wf.import_chunks_batch(
             [
-                ("SRC", "STAGE", "T1", "c1", None),
-                ("SRC", "STAGE", "T1", "c2", None),
+                ("SRC", "STAGE", "T1", "c1", None, None),
+                ("SRC", "STAGE", "T1", "c2", None, None),
             ]
         )
         job = wf._convert_runner.run_imp.call_args[0][0]

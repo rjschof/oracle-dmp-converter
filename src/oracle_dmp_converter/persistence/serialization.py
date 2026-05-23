@@ -17,6 +17,7 @@ from oracle_dmp_converter.models import (
     DumpFormat,
     DumpManifest,
     PartitionMetadata,
+    SubpartitionMetadata,
     TableMetadata,
     TablePlan,
     TableStrategy,
@@ -81,6 +82,24 @@ def column_from_dict(data: dict[str, Any]) -> ColumnMetadata:
     )
 
 
+def subpartition_to_dict(subpartition: SubpartitionMetadata) -> dict[str, Any]:
+    """Serialise a :class:`~oracle_dmp_converter.models.SubpartitionMetadata` to a plain dict."""
+    return {
+        "name": subpartition.name,
+        "position": subpartition.position,
+        "parent_partition": subpartition.parent_partition,
+    }
+
+
+def subpartition_from_dict(data: dict[str, Any]) -> SubpartitionMetadata:
+    """Deserialise a :class:`~oracle_dmp_converter.models.SubpartitionMetadata`."""
+    return SubpartitionMetadata(
+        name=str(data["name"]),
+        position=int(data["position"]),
+        parent_partition=str(data["parent_partition"]),
+    )
+
+
 def partition_to_dict(partition: PartitionMetadata) -> dict[str, Any]:
     """Serialise a :class:`~oracle_dmp_converter.models.PartitionMetadata` to a plain dict.
 
@@ -88,9 +107,14 @@ def partition_to_dict(partition: PartitionMetadata) -> dict[str, Any]:
         partition: Partition metadata to serialise.
 
     Returns:
-        Dictionary with ``"name"`` and ``"position"`` keys.
+        Dictionary with ``"name"`` and ``"position"`` keys.  ``"subpartitions"``
+        is emitted only for composite-partitioned tables to keep manifests
+        compact and stable for the common non-composite case.
     """
-    return {"name": partition.name, "position": partition.position}
+    payload: dict[str, Any] = {"name": partition.name, "position": partition.position}
+    if partition.subpartitions:
+        payload["subpartitions"] = [subpartition_to_dict(sub) for sub in partition.subpartitions]
+    return payload
 
 
 def partition_from_dict(data: dict[str, Any]) -> PartitionMetadata:
@@ -102,7 +126,11 @@ def partition_from_dict(data: dict[str, Any]) -> PartitionMetadata:
     Returns:
         Reconstructed :class:`~oracle_dmp_converter.models.PartitionMetadata`.
     """
-    return PartitionMetadata(name=str(data["name"]), position=int(data["position"]))
+    return PartitionMetadata(
+        name=str(data["name"]),
+        position=int(data["position"]),
+        subpartitions=tuple(subpartition_from_dict(sub) for sub in data.get("subpartitions", ())),
+    )
 
 
 def table_metadata_to_dict(table: TableMetadata) -> dict[str, Any]:
@@ -167,11 +195,16 @@ def chunk_plan_to_dict(chunk: ChunkPlan) -> dict[str, Any]:
         Dictionary with ``"name"``, ``"strategy"``, and ``"partition_name"``
         keys.
     """
-    return {
+    payload: dict[str, Any] = {
         "name": chunk.name,
         "strategy": chunk.strategy.value,
         "partition_name": chunk.partition_name,
     }
+    # Emit subpartition_name only when set to keep plans/reports compact
+    # and stable for the common (non-composite) partition case.
+    if chunk.subpartition_name is not None:
+        payload["subpartition_name"] = chunk.subpartition_name
+    return payload
 
 
 def chunk_plan_from_dict(data: dict[str, Any]) -> ChunkPlan:
@@ -187,6 +220,7 @@ def chunk_plan_from_dict(data: dict[str, Any]) -> ChunkPlan:
         name=str(data["name"]),
         strategy=TableStrategy(str(data["strategy"])),
         partition_name=data.get("partition_name"),
+        subpartition_name=data.get("subpartition_name"),
     )
 
 

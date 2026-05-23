@@ -286,6 +286,7 @@ def count_rows(
     schema: str,
     table: str,
     partition_name: str | None = None,
+    subpartition_name: str | None = None,
 ) -> int:
     """Return the exact row count of a table (or partition) via ``SELECT COUNT(*)``.
 
@@ -295,18 +296,26 @@ def count_rows(
     data and only the target partition's row count should be compared against
     the exported output.
 
+    When *subpartition_name* is provided a bare ``SUBPARTITION (name)``
+    clause is used instead — subpartition names are unique within a table,
+    so the parent ``PARTITION (...)`` qualifier is unnecessary.
+
     Args:
         conn: Active Oracle connection.
         schema: Table owner.
         table: Table name.
         partition_name: Optional Oracle partition name; when given, only rows
             in that partition are counted.
+        subpartition_name: Optional Oracle subpartition name; takes
+            precedence over *partition_name* when both are set.
 
     Returns:
         Number of rows in ``schema.table`` (or the specified partition).
     """
     table_ref = oracle_qualified_name(schema, table)
-    if partition_name:
+    if subpartition_name:
+        table_ref = f"{table_ref} SUBPARTITION ({oracle_identifier(subpartition_name)})"
+    elif partition_name:
         table_ref = f"{table_ref} PARTITION ({oracle_identifier(partition_name)})"
     with conn.cursor() as cursor:
         cursor.execute(f"SELECT COUNT(*) FROM {table_ref}")

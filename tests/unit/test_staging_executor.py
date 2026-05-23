@@ -438,6 +438,7 @@ def test_convert_table_batch_passes_partition_name_for_partition_chunks(tmp_path
         chunk_name: str,
         output_dir: Path,
         partition_name: str | None = None,
+        subpartition_name: str | None = None,
     ):
         captured_partition_names.append(partition_name)
         return MagicMock(
@@ -479,6 +480,7 @@ def test_convert_table_batch_whole_table_chunk_passes_none_partition_name(
         chunk_name: str,
         output_dir: Path,
         partition_name: str | None = None,
+        subpartition_name: str | None = None,
     ):
         captured_partition_names.append(partition_name)
         return MagicMock(

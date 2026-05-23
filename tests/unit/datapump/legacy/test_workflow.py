@@ -47,9 +47,9 @@ class TestImportChunksBatchSingleSchema:
     def test_single_schema_produces_one_imp_call(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "JOBS", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "JOBS", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         assert mock_runner.run_imp.call_count == 1
@@ -57,8 +57,8 @@ class TestImportChunksBatchSingleSchema:
     def test_single_schema_job_has_correct_fromuser_touser(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
@@ -68,9 +68,9 @@ class TestImportChunksBatchSingleSchema:
     def test_single_schema_job_includes_all_tables(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "JOBS", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "JOBS", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
@@ -80,8 +80,8 @@ class TestImportChunksBatchSingleSchema:
         """Two chunks for the same table (e.g. re-queued) must not duplicate TABLES=."""
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         assert mock_runner.run_imp.call_count == 1
@@ -90,13 +90,13 @@ class TestImportChunksBatchSingleSchema:
 
     def test_single_schema_job_rows_true(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
-        workflow.import_chunks_batch([("SRC", "DMP_SRC", "T1", "whole", None)])
+        workflow.import_chunks_batch([("SRC", "DMP_SRC", "T1", "whole", None, None)])
         job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
         assert job.rows is True
 
     def test_single_schema_job_indexes_grants_constraints_false(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
-        workflow.import_chunks_batch([("SRC", "DMP_SRC", "T1", "whole", None)])
+        workflow.import_chunks_batch([("SRC", "DMP_SRC", "T1", "whole", None, None)])
         job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
         assert job.indexes is False
         assert job.grants is False
@@ -107,10 +107,10 @@ class TestImportChunksBatchMultiSchema:
     def test_two_schemas_produce_two_imp_calls(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "WAREHOUSES", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "WAREHOUSES", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         assert mock_runner.run_imp.call_count == 2
@@ -119,16 +119,16 @@ class TestImportChunksBatchMultiSchema:
         """Mirrors the real dump: HRDATA, INVENTORY, FINANCE, AUDITLOG."""
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "JOBS", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "WAREHOUSES", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "STOCK_LEVELS", "whole", None),
-            ("FINANCE", "DMP_FINANCE", "ACCOUNTS", "whole", None),
-            ("FINANCE", "DMP_FINANCE", "TRANSACTIONS", "whole", None),
-            ("FINANCE", "DMP_FINANCE", "MV_ACCOUNT_SUMMARY", "whole", None),
-            ("AUDITLOG", "DMP_AUDITLOG", "CHANGE_LOG", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "JOBS", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "WAREHOUSES", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "STOCK_LEVELS", "whole", None, None),
+            ("FINANCE", "DMP_FINANCE", "ACCOUNTS", "whole", None, None),
+            ("FINANCE", "DMP_FINANCE", "TRANSACTIONS", "whole", None, None),
+            ("FINANCE", "DMP_FINANCE", "MV_ACCOUNT_SUMMARY", "whole", None, None),
+            ("AUDITLOG", "DMP_AUDITLOG", "CHANGE_LOG", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         assert mock_runner.run_imp.call_count == 4
@@ -136,8 +136,8 @@ class TestImportChunksBatchMultiSchema:
     def test_each_schema_group_gets_correct_fromuser(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         calls = mock_runner.run_imp.call_args_list
@@ -149,9 +149,9 @@ class TestImportChunksBatchMultiSchema:
     def test_each_schema_group_gets_only_its_tables(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None),
-            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None),
-            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None),
+            ("HRDATA", "DMP_HRDATA", "EMPLOYEES", "whole", None, None),
+            ("HRDATA", "DMP_HRDATA", "DEPARTMENTS", "whole", None, None),
+            ("INVENTORY", "DMP_INVENTORY", "PRODUCTS", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         calls = mock_runner.run_imp.call_args_list
@@ -164,8 +164,8 @@ class TestImportChunksBatchMultiSchema:
         """No table from one schema must appear in another schema's TABLES= list."""
         workflow, mock_runner = _make_workflow(tmp_path)
         chunks = [
-            ("FINANCE", "DMP_FINANCE", "ACCOUNTS", "whole", None),
-            ("AUDITLOG", "DMP_AUDITLOG", "CHANGE_LOG", "whole", None),
+            ("FINANCE", "DMP_FINANCE", "ACCOUNTS", "whole", None, None),
+            ("AUDITLOG", "DMP_AUDITLOG", "CHANGE_LOG", "whole", None, None),
         ]
         workflow.import_chunks_batch(chunks)
         calls = mock_runner.run_imp.call_args_list

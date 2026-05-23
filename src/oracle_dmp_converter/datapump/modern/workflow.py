@@ -179,12 +179,18 @@ class DataPumpWorkflow(DumpWorkflow):
         table: str,
         chunk_name: str,
         partition_name: str | None,
+        subpartition_name: str | None = None,
     ) -> None:
         """Import one chunk of table data into the staging schema.
 
         Uses ``CONTENT=DATA_ONLY`` and ``TABLE_EXISTS_ACTION=TRUNCATE`` (the
         ``ImportJob`` default) because the staging schema is pre-populated with
         DDL during the inspect phase.
+
+        When *subpartition_name* is set it takes precedence over
+        *partition_name* in the ``TABLES=`` filter — impdp accepts a
+        subpartition name in the ``schema.table:NAME`` slot because
+        subpartition names are unique within a table.
         """
         LOGGER.debug(
             "Importing chunk %s for %s.%s -> %s", chunk_name, source_schema, table, stage_schema
@@ -199,35 +205,44 @@ class DataPumpWorkflow(DumpWorkflow):
             source_schema=source_schema,
             table=table,
             remap_schema=(source_schema, stage_schema),
-            partition_name=partition_name,
+            partition_name=subpartition_name or partition_name,
             content="DATA_ONLY",
         )
         self._convert_runner.run_impdp(job)
 
     def import_chunks_batch(
         self,
-        chunks: list[tuple[str, str, str, str, str | None]],
+        chunks: list[tuple[str, str, str, str, str | None, str | None]],
     ) -> None:
         """Import multiple chunks in a single ``impdp`` invocation.
 
         Combines all ``(source_schema, stage_schema, table, chunk_name,
-        partition_name)`` specs into one ``TABLES=`` line so Oracle starts a
-        single import process for the entire batch instead of one per chunk.
+        partition_name, subpartition_name)`` specs into one ``TABLES=`` line
+        so Oracle starts a single import process for the entire batch instead
+        of one per chunk.  Subpartition names take precedence over partition
+        names in the ``TABLES=`` filter.
         """
         if not chunks:
             return
         LOGGER.debug("Batch-importing %d chunks via single impdp call", len(chunks))
         table_specs = tuple(
-            (source_schema, table, partition_name)
-            for source_schema, _stage_schema, table, _chunk_name, partition_name in chunks
+            (source_schema, table, subpartition_name or partition_name)
+            for (
+                source_schema,
+                _stage_schema,
+                table,
+                _chunk_name,
+                partition_name,
+                subpartition_name,
+            ) in chunks
         )
         # Deduplicate remap pairs while preserving insertion order.
         seen: dict[str, str] = {}
-        for source_schema, stage_schema, _table, _chunk_name, _partition_name in chunks:
+        for source_schema, stage_schema, _table, _chunk_name, _partition_name, _sub in chunks:
             seen.setdefault(source_schema, stage_schema)
         remap_schemas = tuple(seen.items())
         # Build a short logfile name from the first few table names.
-        table_names = [t for _s, _st, t, _c, _p in chunks[:3]]
+        table_names = [t for _s, _st, t, _c, _p, _sub in chunks[:3]]
         logfile_name = f"impdp-batch-{'-'.join(table_names)}.log"[:120]
         job = BatchImportJob(
             connection=self._credentials,

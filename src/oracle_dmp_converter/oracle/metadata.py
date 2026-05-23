@@ -6,7 +6,12 @@ import logging
 
 import oracledb
 
-from oracle_dmp_converter.models import ColumnMetadata, PartitionMetadata, TableMetadata
+from oracle_dmp_converter.models import (
+    ColumnMetadata,
+    PartitionMetadata,
+    SubpartitionMetadata,
+    TableMetadata,
+)
 from oracle_dmp_converter.oracle.conn import _oracle_error_code
 
 LOGGER = logging.getLogger(__name__)
@@ -174,8 +179,39 @@ def discover_table_metadata(conn: oracledb.Connection, schema: str, table: str) 
             owner=schema,
             table_name=table,
         )
+        partition_rows = cursor.fetchall()
+
+        # Composite-partitioned tables (RANGE-HASH, LIST-HASH, etc.) expose
+        # one row per (partition, subpartition) pair in ALL_TAB_SUBPARTITIONS.
+        # Group by parent partition so we can emit one chunk per physical
+        # storage unit downstream.
+        subpartitions_by_parent: dict[str, list[SubpartitionMetadata]] = {}
+        cursor.execute(
+            """
+            SELECT PARTITION_NAME, SUBPARTITION_NAME, SUBPARTITION_POSITION
+            FROM ALL_TAB_SUBPARTITIONS
+            WHERE TABLE_OWNER = :owner AND TABLE_NAME = :table_name
+            ORDER BY PARTITION_NAME, SUBPARTITION_POSITION
+            """,
+            owner=schema,
+            table_name=table,
+        )
+        for parent_name, sub_name, sub_position in cursor.fetchall():
+            subpartitions_by_parent.setdefault(parent_name, []).append(
+                SubpartitionMetadata(
+                    name=sub_name,
+                    position=int(sub_position),
+                    parent_partition=parent_name,
+                )
+            )
+
         partitions = tuple(
-            PartitionMetadata(name=row[0], position=int(row[1])) for row in cursor.fetchall()
+            PartitionMetadata(
+                name=row[0],
+                position=int(row[1]),
+                subpartitions=tuple(subpartitions_by_parent.get(row[0], ())),
+            )
+            for row in partition_rows
         )
 
         cursor.execute(

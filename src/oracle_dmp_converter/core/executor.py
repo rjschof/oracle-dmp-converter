@@ -528,6 +528,7 @@ class StagingExecutor:
         table: str,
         chunk_name: str,
         partition_name: str | None,
+        subpartition_name: str | None = None,
         max_attempts: int = 3,
     ) -> None:
         """Import a single chunk, retrying after tablespace / quota recovery.
@@ -556,6 +557,7 @@ class StagingExecutor:
                     table=table,
                     chunk_name=chunk_name,
                     partition_name=partition_name,
+                    subpartition_name=subpartition_name,
                 )
                 return
             except DataPumpError as exc:
@@ -594,6 +596,7 @@ class StagingExecutor:
         table: str,
         chunk_name: str,
         partition_name: str | None = None,
+        subpartition_name: str | None = None,
     ) -> int:
         stage_schema = self._stage_schema_for(source_schema)
         workflow = self._require_workflow()
@@ -608,6 +611,7 @@ class StagingExecutor:
             table=table,
             chunk_name=chunk_name,
             partition_name=partition_name,
+            subpartition_name=subpartition_name,
         )
 
         with self._connect() as conn:
@@ -621,6 +625,7 @@ class StagingExecutor:
         chunk_name: str,
         output_dir: Path,
         partition_name: str | None = None,
+        subpartition_name: str | None = None,
     ) -> ChunkConversionResult:
         stage_schema = self._stage_schema_for(source_schema)
         output_path = chunk_output_path(
@@ -632,7 +637,13 @@ class StagingExecutor:
         )
         with self._connect() as conn:
             metadata = discover_table_metadata(conn, stage_schema, table)
-            imported_rows = count_rows(conn, stage_schema, table, partition_name)
+            imported_rows = count_rows(
+                conn,
+                stage_schema,
+                table,
+                partition_name,
+                subpartition_name=subpartition_name,
+            )
             col_overrides = {
                 col.name: ov
                 for col in metadata.columns
@@ -647,6 +658,7 @@ class StagingExecutor:
                 output_format=self.output_format,
                 column_overrides=col_overrides or None,
                 partition_name=partition_name,
+                subpartition_name=subpartition_name,
             )
         return ChunkConversionResult(
             name=chunk_name,
@@ -667,12 +679,15 @@ class StagingExecutor:
             table=table_plan.table,
             chunk_name=chunk.name,
             partition_name=chunk.partition_name,
+            subpartition_name=chunk.subpartition_name,
         )
         return self.export_stage_table(
             source_schema=table_plan.schema,
             table=table_plan.table,
             chunk_name=chunk.name,
             output_dir=output_dir,
+            partition_name=chunk.partition_name,
+            subpartition_name=chunk.subpartition_name,
         )
 
     def convert_table_plan(
@@ -959,6 +974,7 @@ class StagingExecutor:
                 chunk_name=chunk.name,
                 output_dir=output_dir,
                 partition_name=chunk.partition_name,
+                subpartition_name=chunk.subpartition_name,
             )
             if result.imported_rows != result.output_rows:
                 msg = (
@@ -1019,13 +1035,14 @@ class StagingExecutor:
         # convert_plan to handle reference-partition FK chains; nothing
         # to do here.
 
-        import_specs: list[tuple[str, str, str, str, str | None]] = [
+        import_specs: list[tuple[str, str, str, str, str | None, str | None]] = [
             (
                 tp.schema,
                 self._stage_schema_for(tp.schema),
                 tp.table,
                 chunk.name,
                 chunk.partition_name,
+                chunk.subpartition_name,
             )
             for tp, chunk in pending
         ]
