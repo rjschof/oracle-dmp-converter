@@ -77,8 +77,9 @@ def _table_unsupported_reason(table: TableMetadata) -> str | None:
 def plan_table(
     table: TableMetadata,
     config: ConverterConfig,
-    dump_format: DumpFormat = DumpFormat.DATAPUMP,
+    dump_format: DumpFormat = DumpFormat.DATAPUMP,  # noqa: ARG001 - retained for API symmetry
 ) -> TablePlan:
+    # pylint: disable=unused-argument  # dump_format kept for backwards-compatible callers.
     """Build a :class:`TablePlan` for a single Oracle table.
 
     Strategy selection follows this priority order:
@@ -88,17 +89,19 @@ def plan_table(
     2. If the config contains any other strategy override, return
        ``UNSUPPORTED`` with a descriptive reason (only ``"whole"`` is
        implemented; ``"range"`` and hash are handled elsewhere).
-    3. If the dump is in legacy ``exp`` format, always return a whole-table
-       chunk (legacy ``imp`` does not support ``QUERY=`` filtering).
-    4. If the table has no partitions, return a whole-table chunk.
-    5. Otherwise return one ``PARTITION`` chunk per partition.
+    3. If the table has no partitions, return a whole-table chunk.
+    4. Otherwise return one ``PARTITION`` chunk per partition (or per
+       subpartition when the partition is composite).  Applies to both
+       modern and legacy dumps — legacy ``imp`` accepts partition and
+       subpartition names in its ``TABLES=`` parameter via the
+       ``schema.table:NAME`` syntax.
 
     Args:
         table: Metadata for the table being planned.
         config: Active converter configuration, used to look up any per-table
             override.
-        dump_format: Format of the source dump file.  Legacy dumps always
-            produce whole-table plans.
+        dump_format: Retained for API symmetry; partition strategy is now
+            independent of dump format.
 
     Returns:
         A :class:`TablePlan` with an appropriate strategy and chunk list.
@@ -141,13 +144,8 @@ def plan_table(
             ),
         )
 
-    if dump_format == DumpFormat.LEGACY or not table.partitions:
-        LOGGER.debug(
-            "%s.%s: strategy=whole (%s)",
-            table.schema,
-            table.name,
-            "legacy dump format" if dump_format == DumpFormat.LEGACY else "no partitions",
-        )
+    if not table.partitions:
+        LOGGER.debug("%s.%s: strategy=whole (no partitions)", table.schema, table.name)
         return TablePlan(
             schema=table.schema,
             table=table.name,

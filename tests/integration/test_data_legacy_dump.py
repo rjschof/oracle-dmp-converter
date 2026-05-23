@@ -242,21 +242,22 @@ def test_legacy_inspect(shared_work: SimpleNamespace) -> None:
 
 
 def test_legacy_plan(shared_work: SimpleNamespace) -> None:
-    """plan subcommand: writes plan.yaml assigning WHOLE_TABLE strategy to all tables."""
+    """plan subcommand: writes plan.yaml with WHOLE_TABLE / PARTITION strategies."""
     assert shared_work.plan_path.exists(), "plan.yaml was not created by plan"
 
     plan = load_plan(shared_work.plan_path)
     assert plan.dump_format == DumpFormat.LEGACY, (
         f"Expected DumpFormat.LEGACY in plan, got {plan.dump_format}"
     )
-    # Every supported table in a legacy dump uses WHOLE_TABLE — legacy
-    # ``imp`` has no QUERY filter so per-partition imports aren't
-    # possible.  Tables with unexportable column types (BFILE, object
-    # types) may show up as UNSUPPORTED instead.
+    # Legacy imp supports TABLES=(T:partition) and TABLES=(T:subpartition),
+    # so partitioned tables drill down just like modern.  Tables with
+    # unexportable column types (BFILE, object types) show as UNSUPPORTED.
     for tp in plan.tables:
-        assert tp.strategy in (TableStrategy.WHOLE_TABLE, TableStrategy.UNSUPPORTED), (
-            f"{tp.table}: expected WHOLE_TABLE or UNSUPPORTED for legacy dump, got {tp.strategy}"
-        )
+        assert tp.strategy in (
+            TableStrategy.WHOLE_TABLE,
+            TableStrategy.PARTITION,
+            TableStrategy.UNSUPPORTED,
+        ), f"{tp.table}: unexpected strategy {tp.strategy}"
 
 
 def test_legacy_convert(shared_work: SimpleNamespace, tmp_path: Path) -> None:

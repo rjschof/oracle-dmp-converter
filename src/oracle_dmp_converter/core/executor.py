@@ -601,7 +601,13 @@ class StagingExecutor:
         stage_schema = self._stage_schema_for(source_schema)
         workflow = self._require_workflow()
 
-        if workflow.dump_format == DumpFormat.LEGACY:
+        # Legacy ``imp`` with IGNORE=Y appends, so for whole-table chunks we
+        # truncate first to keep re-runs idempotent.  Partition / subpartition
+        # chunks must NOT truncate — they need previously imported partitions
+        # of the same table to remain in place.  The caller is responsible for
+        # truncating once at the start of a multi-chunk legacy table (see
+        # _truncate_legacy_stage_tables in the batch path).
+        if workflow.dump_format == DumpFormat.LEGACY and not (partition_name or subpartition_name):
             with self._connect() as conn:
                 truncate_table(conn, stage_schema, table)
 
@@ -701,6 +707,20 @@ class StagingExecutor:
             raise ValueError(f"{table_plan.qualified_name}: {reason}")
 
         self.prepare_stage_schema(table_plan.schema)
+
+        # Legacy partitioned/subpartitioned tables import multiple chunks
+        # via ``imp ... IGNORE=Y`` (APPEND semantics).  Truncate the staging
+        # table once up-front so a re-run starts clean; the per-chunk
+        # truncate in ``import_table_chunk`` only fires for whole-table
+        # chunks now.
+        workflow = self._require_workflow()
+        if workflow.dump_format == DumpFormat.LEGACY and any(
+            c.partition_name or c.subpartition_name for c in table_plan.chunks
+        ):
+            stage_schema = self._stage_schema_for(table_plan.schema)
+            with self._connect() as conn:
+                truncate_table(conn, stage_schema, table_plan.table)
+
         chunk_results: list[ChunkConversionResult] = []
         for chunk in table_plan.chunks:
             state = state_store.get(table_plan.qualified_name, chunk.name) if state_store else None
@@ -1057,6 +1077,23 @@ class StagingExecutor:
             try:
                 result = self._export_one_batched_chunk(tp, chunk, output_dir, state_store)
                 chunk_results[tp.qualified_name].append(result)
+                if chunk.subpartition_name:
+                    LOGGER.info(
+                        "Converted %s.%s subpartition %s/%s: %d rows",
+                        tp.schema,
+                        tp.table,
+                        chunk.partition_name,
+                        chunk.subpartition_name,
+                        result.output_rows,
+                    )
+                elif chunk.partition_name:
+                    LOGGER.info(
+                        "Converted %s.%s partition %s: %d rows",
+                        tp.schema,
+                        tp.table,
+                        chunk.partition_name,
+                        result.output_rows,
+                    )
             except Exception as exc:  # noqa: BLE001
                 # A per-chunk failure (bad type, ORA-00932 on an exotic
                 # column, FK violation on a reference-partitioned import)

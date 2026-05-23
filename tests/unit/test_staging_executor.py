@@ -620,3 +620,300 @@ def test_validate_staging_tables_passes_when_all_present(tmp_path: Path) -> None
     ):
         result = converter.validate_staging_tables([plan])
         assert result == [plan]
+
+
+# ---------------------------------------------------------------------------
+# Legacy truncate semantics for partition / subpartition drill-down
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_import_table_chunk_truncates_for_whole_table(tmp_path: Path) -> None:
+    """Legacy whole-table chunks must truncate the staging table first (re-run idempotency)."""
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.truncate_table") as mock_truncate,
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
+        patch.object(converter, "_import_chunk_with_recovery"),
+    ):
+        converter.import_table_chunk(source_schema="HRDATA", table="EMPLOYEES", chunk_name="whole")
+    mock_truncate.assert_called_once()
+
+
+def test_legacy_import_table_chunk_skips_truncate_for_partition_chunk(tmp_path: Path) -> None:
+    """Partition chunks must NOT truncate — they accumulate via imp IGNORE=Y."""
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.truncate_table") as mock_truncate,
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
+        patch.object(converter, "_import_chunk_with_recovery"),
+    ):
+        converter.import_table_chunk(
+            source_schema="FINANCE",
+            table="TXN_DETAILS",
+            chunk_name="part1",
+            partition_name="P_2024",
+        )
+    mock_truncate.assert_not_called()
+
+
+def test_legacy_import_table_chunk_skips_truncate_for_subpartition_chunk(tmp_path: Path) -> None:
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.truncate_table") as mock_truncate,
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=0),
+        patch.object(converter, "_import_chunk_with_recovery"),
+    ):
+        converter.import_table_chunk(
+            source_schema="FINANCE",
+            table="TXN_DETAILS",
+            chunk_name="sp1",
+            partition_name="P_2024",
+            subpartition_name="SYS_SUBP357",
+        )
+    mock_truncate.assert_not_called()
+
+
+def test_convert_table_plan_truncates_once_for_legacy_partitioned_table(tmp_path: Path) -> None:
+    """convert_table_plan must truncate the staging table once before the chunk loop
+    when running legacy + partitioned (otherwise re-runs would stack rows)."""
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+
+    plan = TablePlan(
+        schema="FINANCE",
+        table="TXN_DETAILS",
+        strategy=TableStrategy.PARTITION,
+        chunks=(
+            ChunkPlan(
+                name="sp1",
+                strategy=TableStrategy.PARTITION,
+                partition_name="P_2024",
+                subpartition_name="SYS_SUBP357",
+            ),
+            ChunkPlan(
+                name="sp2",
+                strategy=TableStrategy.PARTITION,
+                partition_name="P_2024",
+                subpartition_name="SYS_SUBP358",
+            ),
+        ),
+    )
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    fake_result = MagicMock(imported_rows=5, output_rows=5, output_path=tmp_path / "x.parquet")
+    fake_result.name = "sp1"
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.truncate_table") as mock_truncate,
+        patch.object(converter, "convert_chunk_plan", return_value=fake_result),
+    ):
+        converter.convert_table_plan(plan, tmp_path)
+
+    # Exactly one truncate at the start of convert_table_plan (the chunk loop does
+    # not re-truncate because each chunk has partition/subpartition).
+    assert mock_truncate.call_count == 1
+
+
+def test_convert_table_plan_no_truncate_for_legacy_whole_table(tmp_path: Path) -> None:
+    """Legacy whole-table tables don't get the new pre-chunk truncate — the per-chunk
+    truncate inside import_table_chunk handles them as before."""
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+
+    plan = _whole_table_plan("HRDATA", "EMPLOYEES")
+    _, mock_ctx = _mock_conn_ctx()
+
+    fake_result = MagicMock(imported_rows=5, output_rows=5, output_path=tmp_path / "x.parquet")
+    fake_result.name = "whole"
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.truncate_table") as mock_truncate,
+        patch.object(converter, "convert_chunk_plan", return_value=fake_result),
+    ):
+        converter.convert_table_plan(plan, tmp_path)
+
+    # The pre-chunk truncate inside convert_table_plan must NOT fire (no
+    # partition/subpartition chunks).  Per-chunk truncate inside
+    # import_table_chunk would have, but convert_chunk_plan is mocked here.
+    mock_truncate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-chunk INFO log (visibility for partition / subpartition drill-down)
+# ---------------------------------------------------------------------------
+
+
+def test_convert_table_batch_logs_per_partition_chunk(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+
+    plan = TablePlan(
+        schema="FINANCE",
+        table="TRANSACTIONS",
+        strategy=TableStrategy.PARTITION,
+        chunks=(
+            ChunkPlan(
+                name="partition-00001-P_2024_Q1",
+                strategy=TableStrategy.PARTITION,
+                partition_name="P_2024_Q1",
+            ),
+            ChunkPlan(
+                name="partition-00002-P_2024_Q2",
+                strategy=TableStrategy.PARTITION,
+                partition_name="P_2024_Q2",
+            ),
+        ),
+    )
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    def fake_export(conn: object, **kw: object) -> MagicMock:
+        export = MagicMock()
+        export.rows = 25
+        export.path = tmp_path / "FINANCE" / "TRANSACTIONS" / f"{kw['table_name']}.parquet"
+        return export
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.truncate_table"),
+        patch(
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
+            side_effect=lambda conn, schema, table: _fake_metadata(schema, table),
+        ),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=25),
+        patch(
+            "oracle_dmp_converter.core.executor.export_table",
+            side_effect=fake_export,
+        ),
+        caplog.at_level("INFO", logger="oracle_dmp_converter.core.executor"),
+    ):
+        converter.convert_table_batch([plan], tmp_path)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Converted FINANCE.TRANSACTIONS partition P_2024_Q1: 25 rows" in messages
+    assert "Converted FINANCE.TRANSACTIONS partition P_2024_Q2: 25 rows" in messages
+
+
+def test_convert_table_batch_logs_per_subpartition_chunk(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+
+    plan = TablePlan(
+        schema="FINANCE",
+        table="TRANSACTION_DETAILS",
+        strategy=TableStrategy.PARTITION,
+        chunks=(
+            ChunkPlan(
+                name="subpartition-00001-00001-P_2024-SYS_SUBP377",
+                strategy=TableStrategy.PARTITION,
+                partition_name="P_2024",
+                subpartition_name="SYS_SUBP377",
+            ),
+        ),
+    )
+
+    _, mock_ctx = _mock_conn_ctx()
+
+    def fake_export(conn: object, **kw: object) -> MagicMock:
+        export = MagicMock()
+        export.rows = 12
+        export.path = tmp_path / "FINANCE" / "TRANSACTION_DETAILS" / f"{kw['table_name']}.parquet"
+        return export
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.truncate_table"),
+        patch(
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
+            side_effect=lambda conn, schema, table: _fake_metadata(schema, table),
+        ),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=12),
+        patch(
+            "oracle_dmp_converter.core.executor.export_table",
+            side_effect=fake_export,
+        ),
+        caplog.at_level("INFO", logger="oracle_dmp_converter.core.executor"),
+    ):
+        converter.convert_table_batch([plan], tmp_path)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert (
+        "Converted FINANCE.TRANSACTION_DETAILS subpartition P_2024/SYS_SUBP377: 12 rows" in messages
+    )
+
+
+def test_convert_table_batch_whole_table_emits_no_per_chunk_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Whole-table chunks emit no per-chunk line.  The per-table summary line
+    emitted by convert_plan covers them; adding a per-chunk line here would
+    be redundant noise."""
+    converter = _make_converter(ConverterConfig())
+    mock_workflow = MagicMock()
+    mock_workflow.dump_format = DumpFormat.LEGACY
+    converter._workflow = mock_workflow  # type: ignore[attr-defined]
+
+    plan = _whole_table_plan("HRDATA", "EMPLOYEES")
+    _, mock_ctx = _mock_conn_ctx()
+
+    with (
+        patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+        patch("oracle_dmp_converter.core.executor.ensure_schema"),
+        patch("oracle_dmp_converter.core.executor.truncate_table"),
+        patch(
+            "oracle_dmp_converter.core.executor.discover_table_metadata",
+            side_effect=lambda conn, schema, table: _fake_metadata(schema, table),
+        ),
+        patch("oracle_dmp_converter.core.executor.count_rows", return_value=5),
+        patch(
+            "oracle_dmp_converter.core.executor.export_table",
+            return_value=_fake_export(tmp_path, "HRDATA", "EMPLOYEES", rows=5),
+        ),
+        caplog.at_level("INFO", logger="oracle_dmp_converter.core.executor"),
+    ):
+        converter.convert_table_batch([plan], tmp_path)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("partition" in m or "subpartition" in m for m in messages), (
+        f"unexpected per-chunk log: {messages!r}"
+    )

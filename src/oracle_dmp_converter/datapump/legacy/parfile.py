@@ -11,8 +11,13 @@ different parameter format.  Key differences from Data Pump parfiles:
   ``CONTENT=``.
 * Individual object-type exclusions (``INDEXES=N``, ``GRANTS=N``, …)
   replace the generic ``EXCLUDE=`` directive.
-* There is no ``QUERY=`` support, so hash/partition chunking is not
-  available.
+* There is no ``QUERY=`` support, so arbitrary WHERE-filter chunking
+  is impossible.  Partition- and subpartition-level imports *are*
+  supported via the ``TABLES=schema.table:NAME`` syntax (Oracle's
+  Original Import docs accept both partition and subpartition names in
+  the ``:NAME`` slot since subpartition names are unique within a
+  table).  ``LegacyImportJob.tables`` entries may therefore include
+  ``:NAME`` qualifiers.
 * The ``INDEXFILE=`` parameter writes CREATE TABLE / CREATE INDEX DDL
   to a file without executing any import - the equivalent of Data
   Pump's ``SQLFILE=``.
