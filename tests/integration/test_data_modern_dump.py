@@ -25,8 +25,8 @@ Each test exercises one CLI subcommand:
   * test_modern_plan             — ``plan`` (inspect already done by fixture)
   * test_modern_convert          — ``convert --plan`` (Parquet)
   * test_modern_convert_oneshot  — ``convert`` in one-shot mode (no prior ``--plan``)
-  * test_modern_convert_avro     — ``convert --plan --format avro``
-  * test_modern_convert_csv      — ``convert --plan --format csv``
+  * test_modern_convert_avro     — ``convert --plan --format avro`` (skipped)
+  * test_modern_convert_csv      — ``convert --plan --format csv`` (skipped)
 """
 
 from __future__ import annotations
@@ -341,6 +341,9 @@ def test_modern_convert_oneshot(tmp_path: Path) -> None:
     _assert_conversion_report(work_dir, _TOTAL_ROWS)
 
 
+@pytest.mark.skip(
+    reason="Avro/CSV conversion covered by unit tests; skipped to cut integration runtime"
+)
 def test_modern_convert_avro(shared_work: SimpleNamespace, tmp_path: Path) -> None:
     """convert with --plan --format avro: produces correct Avro output for all tables."""
     output_dir = tmp_path / "avro"
@@ -367,6 +370,9 @@ def test_modern_convert_avro(shared_work: SimpleNamespace, tmp_path: Path) -> No
     _assert_conversion_report(shared_work.work_dir, _TOTAL_ROWS)
 
 
+@pytest.mark.skip(
+    reason="Avro/CSV conversion covered by unit tests; skipped to cut integration runtime"
+)
 def test_modern_convert_csv(shared_work: SimpleNamespace, tmp_path: Path) -> None:
     """convert with --plan --format csv: produces correct CSV output for all tables."""
     output_dir = tmp_path / "csv"
