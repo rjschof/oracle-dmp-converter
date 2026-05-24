@@ -59,6 +59,9 @@ class TestArrowTypeForColumn:
         # so values past 2^53 round-trip without silent precision loss.
         assert arrow_type_for_column(_col("NUMBER")) == pa.decimal128(38, 0)
 
+    def test_float_maps_to_double(self) -> None:
+        assert arrow_type_for_column(_col("BINARY_DOUBLE")) == pa.float64()
+
     def test_varchar2(self) -> None:
         assert arrow_type_for_column(_col("VARCHAR2")) == pa.string()
 
@@ -412,6 +415,12 @@ class TestDbObjectToText:
             mock_oracledb.DbObject = _FakeDbObject
             result = _db_object_to_text(_FakeDbObject(attrs={"amount": Decimal("12.50")}))
         assert '"amount": "12.50"' in result
+
+    def test_bytes_attr_is_decoded(self) -> None:
+        with patch.object(exporter_module, "oracledb") as mock_oracledb:
+            mock_oracledb.DbObject = _FakeDbObject
+            result = _db_object_to_text(_FakeDbObject(attrs={"blob": b"hello"}))
+        assert '"blob": "hello"' in result
 
 
 class TestFieldMetadataFor:

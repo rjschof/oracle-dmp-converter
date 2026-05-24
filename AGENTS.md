@@ -31,24 +31,28 @@ make clean          # removes .venv dist build work parquet sample-data tests/ru
 
 ## Testing
 
+Coverage is **always on** and **gated at 92%**: `--cov` is set in `pyproject.toml`
+`addopts` and `[tool.coverage.report] fail_under = 92`. Any pytest run that doesn't
+cover ≥ 92% of `src` exits non-zero — so when running a *subset* of tests (a single
+file, a single test, or a keyword filter), pass `--no-cov` to skip the threshold,
+otherwise the partial run "fails" on coverage even when the tests pass.
+
 ```bash
-# Unit tests — no Docker required
+# Unit tests — no Docker required (enforces the 92% gate)
 uv run python -m pytest tests/unit
 
-# Single test file
-uv run python -m pytest tests/unit/test_planner.py
+# Single test file — add --no-cov so the coverage gate doesn't trip on a partial run
+uv run python -m pytest tests/unit/test_planner.py --no-cov
 
 # Single test by name
-uv run python -m pytest tests/unit/test_planner.py::test_partitioned_table_plans_partition_chunks
+uv run python -m pytest tests/unit/test_planner.py::test_partitioned_table_plans_partition_chunks --no-cov
 
 # Keyword filter
-uv run python -m pytest -k "test_small_table"
+uv run python -m pytest -k "test_small_table" --no-cov
 
-# With coverage
-uv run python -m pytest tests/unit --cov=oracle_dmp_converter
-
-# Integration tests — require Docker; pull ~1-2 GB Oracle image on first run; several minutes
-uv run python -m pytest tests/integration
+# Integration tests — require Docker; pull ~1-2 GB Oracle image on first run; several
+# minutes. Use --no-cov: they exercise only a slice of src and would trip the gate.
+uv run python -m pytest tests/integration --no-cov
 ```
 
 Integration tests auto-skip when Docker is unavailable (autouse `skip_if_no_docker` fixture in `tests/integration/conftest.py`). No marker needed on individual tests.
@@ -113,9 +117,9 @@ GitHub Actions, defined in `.github/workflows/`:
 - **`ci.yml`** runs on every push and pull request (all branches) with five independent jobs:
   - `format-check` → `make format-check`
   - `lint` → `make lint`
-  - `unit-tests` → `uv run pytest tests/unit --cov --cov-report=term-missing` (uploads `htmlcov/` as an artifact)
-  - `modern-integration-tests` → `tests/integration/test_data_modern_dump.py` (30-min timeout)
-  - `legacy-integration-tests` → `tests/integration/test_data_legacy_dump.py` (30-min timeout)
+  - `unit-tests` → `uv run pytest tests/unit --cov --cov-report=term-missing` (uploads `htmlcov/` as an artifact); fails if coverage drops below the 92% `fail_under` gate
+  - `modern-integration-tests` → `tests/integration/test_data_modern_dump.py --no-cov` (30-min timeout)
+  - `legacy-integration-tests` → `tests/integration/test_data_legacy_dump.py --no-cov` (30-min timeout)
 - **`release.yml`** runs on published GitHub releases: `uv build`, then uploads the wheel and sdist as release assets.
 
 No `.pre-commit-config.yaml`. The `Makefile` is the local task runner; CI calls the same `make` targets.

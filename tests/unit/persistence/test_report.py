@@ -119,6 +119,20 @@ class TestBuildConversionReport:
         assert report.statistics.tables_total == 2
         assert report.statistics.total_output_rows == 10
 
+    def test_supported_table_without_result_is_skipped(self) -> None:
+        """A supported plan table with no conversion result is recorded as skipped.
+
+        Happens when the staging table was absent at convert time (e.g. a legacy
+        exp dump with incomplete DDL) rather than crashing on a missing key.
+        """
+        plan = _plan([_whole_table_plan("S", "MISSING")])
+        result = PlanConversionResult(tables=(), started_at=_NOW, completed_at=_NOW)
+        report = build_conversion_report(plan, result, "parquet")
+        assert report.statistics.tables_converted == 0
+        assert report.statistics.tables_skipped == 1
+        assert len(report.skipped) == 1
+        assert "Staging table was absent" in report.skipped[0].reason
+
     def test_output_format_recorded(self) -> None:
         plan = _plan([_whole_table_plan("S", "T")])
         result = _result([("S", "T", 5)])

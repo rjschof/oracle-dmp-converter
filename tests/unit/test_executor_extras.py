@@ -426,9 +426,7 @@ class TestPhaseTimingHelpers:
 
     def test_emit_swallows_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Point at a path that can never be opened (directory that doesn't exist).
-        monkeypatch.setenv(
-            "DMP_CONVERTER_PHASE_TIMING_FILE", "/nonexistent/dir/phases.jsonl"
-        )
+        monkeypatch.setenv("DMP_CONVERTER_PHASE_TIMING_FILE", "/nonexistent/dir/phases.jsonl")
         # Must not raise.
         _emit_phase_timing("preclear_legacy_batch", chunks=3)
 

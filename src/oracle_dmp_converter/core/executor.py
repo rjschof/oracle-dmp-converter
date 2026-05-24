@@ -1172,9 +1172,7 @@ class StagingExecutor:
                         chunk=chunk.name,
                         is_subpartition=bool(chunk.subpartition_name),
                     ):
-                        result = self._export_one_batched_chunk(
-                            tp, chunk, output_dir, state_store
-                        )
+                        result = self._export_one_batched_chunk(tp, chunk, output_dir, state_store)
                     chunk_results[tp.qualified_name].append(result)
                     if chunk.subpartition_name:
                         LOGGER.info(

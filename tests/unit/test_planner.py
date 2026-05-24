@@ -235,6 +235,20 @@ def test_object_type_column_marks_table_unsupported() -> None:
     assert "FINANCE.ADDRESS_T" in (plan.reason or "")
 
 
+def test_builtin_owned_type_column_is_supported() -> None:
+    """Owner-qualified built-ins (PUBLIC.XMLTYPE) are handled natively, not UNSUPPORTED."""
+    table = TableMetadata(
+        schema="DOCS",
+        name="ARTICLES",
+        columns=(
+            ColumnMetadata("ID", "NUMBER", 1, data_precision=10, data_scale=0),
+            ColumnMetadata("BODY", "XMLTYPE", 2, data_type_owner="PUBLIC"),
+        ),
+    )
+    plan = plan_table(table, ConverterConfig())
+    assert plan.strategy == TableStrategy.WHOLE_TABLE
+
+
 def test_varray_column_marks_table_unsupported() -> None:
     """VARRAY columns (collection types) are treated the same as object types."""
     table = TableMetadata(

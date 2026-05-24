@@ -70,6 +70,18 @@ def test_xmltype_is_stringified() -> None:
     assert export_expression(column) == "XMLSERIALIZE(DOCUMENT C1 AS CLOB)"
 
 
+def test_oversized_number_precision_falls_back_to_double() -> None:
+    """A NUMBER whose precision exceeds Oracle's max (38) can't fit decimal128 → double."""
+    assert oracle_to_arrow_token(col("NUMBER", 40, 2)) == "double"
+
+
+def test_timestamp_with_time_zone_uses_to_char() -> None:
+    """Stringified types without a type-specific template fall back to TO_CHAR()."""
+    column = col("TIMESTAMP WITH TIME ZONE")
+    assert oracle_to_arrow_token(column) == "string"
+    assert export_expression(column) == "TO_CHAR(C1)"
+
+
 def test_float_type_maps_to_double() -> None:
     assert oracle_to_arrow_token(col("FLOAT", 126)) == "double"
 
