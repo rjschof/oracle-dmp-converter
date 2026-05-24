@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from oracle_dmp_converter.config import ColumnOverride
@@ -17,6 +18,7 @@ from oracle_dmp_converter.oracle import exporter as exporter_module
 from oracle_dmp_converter.oracle.exporter import (
     _coerce_value,
     _db_object_to_text,
+    _decode_utf8,
     _field_metadata_for,
     _read_lob,
     _rows_to_table,
@@ -24,6 +26,7 @@ from oracle_dmp_converter.oracle.exporter import (
     arrow_type_for_column,
     export_table,
 )
+from oracle_dmp_converter.oracle.format_writer import AvroFormatWriter
 
 
 def _col(
@@ -421,6 +424,75 @@ class TestDbObjectToText:
             mock_oracledb.DbObject = _FakeDbObject
             result = _db_object_to_text(_FakeDbObject(attrs={"blob": b"hello"}))
         assert '"blob": "hello"' in result
+
+
+# ---------------------------------------------------------------------------
+# NUMBER scale edge cases must actually WRITE (regression: negative scale and
+# scale>precision used to crash the Parquet writer and the Avro schema parser).
+# ---------------------------------------------------------------------------
+
+
+class TestNumberEdgeScalesRoundTrip:
+    @pytest.mark.parametrize(
+        ("precision", "scale", "value", "expected"),
+        [
+            (10, -2, Decimal("12300"), 12300),  # int64
+            (20, -2, Decimal("12300"), Decimal("12300")),  # decimal128(22,0)
+            (2, 5, Decimal("0.00012"), Decimal("0.00012")),  # decimal128(5,5)
+            (5, 7, Decimal("0.0000012"), Decimal("0.0000012")),  # decimal128(7,7)
+        ],
+    )
+    def test_parquet_write_and_read_back(
+        self,
+        tmp_path: Path,
+        precision: int,
+        scale: int,
+        value: Decimal,
+        expected: object,
+    ) -> None:
+        columns = (_col("NUMBER", precision, scale, name="N"),)
+        schema = arrow_schema_for_columns(columns)
+        table = _rows_to_table([(value,)], schema)
+        out = tmp_path / "n.parquet"
+        pq.write_table(table, out)  # must not raise
+        back = pq.read_table(out)
+        assert back.column("N").to_pylist()[0] == expected
+
+    @pytest.mark.parametrize(
+        ("precision", "scale", "value"),
+        [
+            (20, -2, Decimal("12300")),
+            (2, 5, Decimal("0.00012")),
+        ],
+    )
+    def test_avro_write_does_not_raise(
+        self, tmp_path: Path, precision: int, scale: int, value: Decimal
+    ) -> None:
+        columns = (_col("NUMBER", precision, scale, name="N"),)
+        schema = arrow_schema_for_columns(columns)
+        table = _rows_to_table([(value,)], schema)
+        writer = AvroFormatWriter(tmp_path / "n.avro", schema)  # parse must not raise
+        writer.write_batch(table)  # write must not raise
+        writer.close()
+        assert (tmp_path / "n.avro").exists()
+
+
+# ---------------------------------------------------------------------------
+# _decode_utf8 — warns (rather than silently corrupting) on invalid bytes
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeUtf8:
+    def test_clean_utf8_decodes_without_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            assert _decode_utf8("héllo".encode()) == "héllo"
+        assert not caplog.records
+
+    def test_invalid_bytes_warn_and_replace(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            result = _decode_utf8(b"ab\xffcd")
+        assert "�" in result
+        assert any("Non-UTF-8" in r.message for r in caplog.records)
 
 
 class TestFieldMetadataFor:

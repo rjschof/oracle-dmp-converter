@@ -1348,7 +1348,19 @@ def create_audit_tier2_tables(conn: oracledb.Connection) -> None:
             "  BIG38 NUMBER(38),"
             "  STAR_ZERO NUMBER(*,0),"
             "  UNBOUNDED NUMBER,"
-            "  SMALL_DEC NUMBER(5,4)"
+            "  SMALL_DEC NUMBER(5,4),"
+            # Scales Oracle permits but the Parquet/Avro decimal logical types
+            # reject without normalisation: negative scale (rounded integers)
+            # and scale greater than precision (pure fractions).
+            "  NEG_SCALE NUMBER(10,-2),"
+            "  NEG_SCALE_WIDE NUMBER(20,-2),"
+            "  FRAC_SCALE NUMBER(2,5),"
+            # FLOAT exercises the converter's FLOAT_TYPES -> double path, which
+            # previously had no real column (the PRODUCTS "BINARY_*" comments
+            # are misleading: those columns are NUMBER).  BINARY_FLOAT /
+            # BINARY_DOUBLE are intentionally NOT used here because legacy
+            # ``exp`` raises EXP-00104 and drops the whole table.
+            "  LEGACY_FLOAT FLOAT(126)"
             ") TABLESPACE COMBINED_DATA",
         ],
         ignored_codes={942},
@@ -1718,12 +1730,20 @@ def insert_audit_extension_data(conn: oracledb.Connection) -> None:
         with conn.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO FINANCE.NUMERIC_EDGE"
-                " (ROW_ID, BIG38, STAR_ZERO, UNBOUNDED, SMALL_DEC)"
-                " VALUES (:1, :2, :3, :4, :5)",
+                " (ROW_ID, BIG38, STAR_ZERO, UNBOUNDED, SMALL_DEC,"
+                "  NEG_SCALE, NEG_SCALE_WIDE, FRAC_SCALE, LEGACY_FLOAT)"
+                " VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9)",
                 [
-                    (1, 10**37, 12345678901234567890, 1.5, 0.0001),
-                    (2, -(10**37), -42, 0, 0.9999),
-                    (3, 1, 0, 1.0e20, 0.5),
+                    # NEG_SCALE/NEG_SCALE_WIDE values are multiples of 100;
+                    # FRAC_SCALE values are < 0.001 (NUMBER(2,5) is a fraction).
+                    # FLOAT values stay within Oracle NUMBER range (~1e125) so
+                    # oracledb's default NUMBER bind does not overflow.
+                    (1, 10**37, 12345678901234567890, 1.5, 0.0001,
+                     12300, 1234500, 0.00012, 1.2345678901234),
+                    (2, -(10**37), -42, 0, 0.9999,
+                     -4200, -100, 0.00099, 987654321.5),
+                    (3, 1, 0, 1.0e20, 0.5,
+                     0, 500, 0.00001, 0.0009765625),
                 ],
             )
         conn.commit()
@@ -2168,7 +2188,7 @@ this list is best-effort: check the export log to confirm which materialized.
 | `AUDITLOG.ATTACHMENTS` | `BFILE` column |
 | `AUDITLOG.LONG_NOTES` | `LONG` column |
 | `AUDITLOG.LONG_BLOBS` | `LONG RAW` column |
-| `FINANCE.NUMERIC_EDGE` | `NUMBER(38)`, `NUMBER(*,0)`, unbounded `NUMBER`, `NUMBER(5,4)` |
+| `FINANCE.NUMERIC_EDGE` | NUMBER scale edges (negative scale, scale>precision) + FLOAT(126) |
 | `HRDATA.EMPLOYEES.KANJI_NAME` | `NVARCHAR2` with kanji / cyrillic / emoji samples |
 
 ### Tier 3 — Partitioning & constraints

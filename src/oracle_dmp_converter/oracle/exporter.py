@@ -116,6 +116,24 @@ def _field_metadata_for(column: ColumnMetadata) -> dict[bytes, bytes] | None:
     return metadata
 
 
+def _decode_utf8(value: bytes) -> str:
+    """Decode *value* as UTF-8, warning once if invalid bytes are replaced.
+
+    ``errors="replace"`` keeps the export from crashing on non-UTF-8 bytes,
+    but it silently substitutes U+FFFD for the offending sequence.  Attempt a
+    strict decode first so a clean warning is logged when data is actually
+    lost, rather than corrupting the output without a trace.
+    """
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        LOGGER.warning(
+            "Non-UTF-8 bytes encountered while decoding a string value; "
+            "invalid sequences replaced with U+FFFD (data may be lost)"
+        )
+        return value.decode("utf-8", errors="replace")
+
+
 def _read_lob(value: Any) -> Any:
     """Read a LOB value into a plain Python object if needed.
 
@@ -161,7 +179,7 @@ def _db_object_to_text(obj: oracledb.DbObject) -> str:
                 return [_walk(item) for item in node.aslist()]
             return {attr.name: _walk(getattr(node, attr.name)) for attr in type_info.attributes}
         if isinstance(node, (bytes, bytearray)):
-            return node.decode("utf-8", errors="replace")
+            return _decode_utf8(bytes(node))
         if isinstance(node, (datetime, date)):
             return node.isoformat()
         if isinstance(node, Decimal):
@@ -192,7 +210,7 @@ def _coerce_value(value: Any, arrow_type: pa.DataType) -> Any:
         return None
     if pa.types.is_string(arrow_type):
         if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
+            return _decode_utf8(value)
         return str(value)
     if pa.types.is_binary(arrow_type):
         if isinstance(value, str):

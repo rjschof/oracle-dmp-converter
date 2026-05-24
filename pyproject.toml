@@ -31,7 +31,7 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--import-mode=importlib --cov"
+addopts = "--import-mode=importlib --cov=src"
 markers = [
     "integration: tests that require Docker and Oracle Free",
 ]

@@ -19,6 +19,7 @@ from oracle_dmp_converter.datapump.legacy.runner import LegacyRunner
 from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.models import DumpFormat
 from oracle_dmp_converter.oracle.conn import OracleCredentials
+from oracle_dmp_converter.oracle.identifiers import oracle_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +61,23 @@ _INDEXFILE_NAME = "dmpconverter-legacy-discovery.sql"
 # to the host without an extra ``docker cp`` / ``cat`` round-trip.
 _INDEXFILE_REMOTE = f"/work/discovery/{_INDEXFILE_NAME}"
 _DISCOVERY_LOG = "dmpconverter-legacy-discovery.log"
+
+
+def _legacy_table_spec(table: str, qualifier: str | None = None) -> str:
+    """Render a legacy ``imp`` ``TABLES=`` entry, quoting as Oracle requires.
+
+    Legacy ``imp`` upper-cases unquoted identifiers just like SQL, so a
+    mixed-case, reserved-word, or special-character table / partition name
+    must be double-quoted to match what is stored in the dump — otherwise
+    ``imp`` looks for the upper-cased name, finds nothing, and silently
+    imports zero rows.  This mirrors the modern Data Pump path's
+    ``_table_spec`` (``datapump/modern/parfile.py``), which already quotes
+    every component via :func:`oracle_identifier`.
+    """
+    spec = oracle_identifier(table)
+    if qualifier:
+        spec += f":{oracle_identifier(qualifier)}"
+    return spec
 
 
 class LegacyDumpWorkflow(DumpWorkflow):
@@ -233,7 +251,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
             logfile=f"imp-meta-{source_schema}-{table}.log"[:120],
             fromuser=source_schema,
             touser=stage_schema,
-            tables=(table,),
+            tables=(_legacy_table_spec(table),),
             rows=False,
             indexes=False,
             grants=False,
@@ -275,7 +293,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
         *partition_name*; when neither is set the whole table is imported.
         """
         qualifier = subpartition_name or partition_name
-        table_spec = f"{table}:{qualifier}" if qualifier else table
+        table_spec = _legacy_table_spec(table, qualifier)
         LOGGER.debug(
             "Importing legacy chunk %s for %s.%s%s -> %s",
             chunk_name,
@@ -326,7 +344,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
             subpartition_name,
         ) in chunks:
             qualifier = subpartition_name or partition_name
-            spec = f"{table}:{qualifier}" if qualifier else table
+            spec = _legacy_table_spec(table, qualifier)
             key = (source_schema, stage_schema)
             schema_groups.setdefault(key, []).append(spec)
 

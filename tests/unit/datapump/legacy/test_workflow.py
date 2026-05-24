@@ -127,6 +127,27 @@ class TestImportChunkPartitionSyntax:
         job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
         assert job.tables == ("EMPLOYEES",)
 
+    def test_mixed_case_table_name_is_quoted(self, tmp_path: Path) -> None:
+        """imp upper-cases unquoted names; a mixed-case table must be quoted."""
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunk("HRDATA", "DMP_HRDATA", "MixedCase_Table", "whole", None)
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        assert job.tables == ('"MixedCase_Table"',)
+
+    def test_reserved_word_and_mixed_case_partition_are_quoted(self, tmp_path: Path) -> None:
+        """A mixed-case partition name on a reserved-word table must both be quoted."""
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunk("HRDATA", "DMP_HRDATA", "SELECT", "p1", "MixedPart")
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        assert job.tables == ('"SELECT":"MixedPart"',)
+
+    def test_simple_uppercase_names_remain_unquoted(self, tmp_path: Path) -> None:
+        """Backward compatibility: ordinary uppercase names are not quoted."""
+        workflow, mock_runner = _make_workflow(tmp_path)
+        workflow.import_chunk("HRDATA", "DMP_HRDATA", "EMPLOYEES", "p1", "P_NORTH")
+        job: LegacyImportJob = mock_runner.run_imp.call_args[0][0]
+        assert job.tables == ("EMPLOYEES:P_NORTH",)
+
     def test_batch_mixes_qualified_and_unqualified_table_specs(self, tmp_path: Path) -> None:
         workflow, mock_runner = _make_workflow(tmp_path)
         workflow.import_chunks_batch(

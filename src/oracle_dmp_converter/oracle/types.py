@@ -40,7 +40,57 @@ UNSUPPORTED_COLUMN_TYPES = frozenset({"BFILE"})
 # Oracle's maximum NUMBER precision; used as a safe default when a column is
 # declared as ``NUMBER`` (unbounded) or ``NUMBER(*,0)`` and the converter
 # would otherwise silently drop to ``double`` (loses precision past 2^53).
+# It is also the widest precision ``decimal128`` (and the Parquet/Avro decimal
+# logical types) can represent.
 _NUMBER_MAX_PRECISION = 38
+# A scale-0 ``NUMBER`` with this many digits or fewer fits losslessly in int64
+# (2^63-1 has 19 digits, so 18 is the safe limit).
+_INT64_MAX_DIGITS = 18
+
+
+def _number_token(precision: int | None, scale: int | None) -> str:
+    """Map an Oracle ``NUMBER(precision, scale)`` to an Arrow type token.
+
+    Oracle permits scales outside ``0 <= scale <= precision`` — negative
+    scales (``NUMBER(10,-2)``, rounded to the hundred) and scales that
+    exceed the precision (``NUMBER(2,5)``, a pure fraction).  The
+    Parquet/Avro decimal logical types reject both, so the raw values must
+    be normalised into a valid ``(arrow_precision, arrow_scale)`` pair
+    before they reach a writer.
+
+    The conversions preserve the exact value:
+
+    * negative scale ``s`` → a scale-0 decimal wide enough for the implied
+      trailing zeros (``arrow_precision = precision + |s|``);
+    * scale ``s`` greater than ``precision`` → ``decimal128(s, s)`` (the
+      value is a fraction, so ``s`` significant digits suffice).
+
+    Anything that would need more than :data:`_NUMBER_MAX_PRECISION` digits
+    falls back to ``double``.
+    """
+    scale = scale or 0
+    if precision is None:
+        # Unbounded ``NUMBER`` / ``NUMBER(*,s)``: default to the widest fixed
+        # decimal Oracle supports so large integers round-trip exactly.
+        if scale <= 0:
+            return f"decimal128({_NUMBER_MAX_PRECISION},0)"
+        arrow_scale = min(scale, _NUMBER_MAX_PRECISION)
+        return f"decimal128({_NUMBER_MAX_PRECISION},{arrow_scale})"
+    if scale < 0:
+        arrow_precision = precision - scale  # precision + |scale|
+        if arrow_precision > _NUMBER_MAX_PRECISION:
+            return "double"
+        if arrow_precision <= _INT64_MAX_DIGITS:
+            return "int64"
+        return f"decimal128({arrow_precision},0)"
+    if scale == 0:
+        if precision <= _INT64_MAX_DIGITS:
+            return "int64"
+        return f"decimal128({precision},0)"
+    arrow_precision = max(precision, scale)
+    if arrow_precision > _NUMBER_MAX_PRECISION:
+        return "double"
+    return f"decimal128({arrow_precision},{scale})"
 
 
 def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
@@ -74,23 +124,7 @@ def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | Non
         return override.parquet_type
     data_type = column.normalized_type
     if data_type == "NUMBER":
-        precision = column.data_precision
-        scale = column.data_scale
-        if scale == 0 and precision is not None and precision <= 18:
-            return "int64"
-        if precision is not None and precision <= _NUMBER_MAX_PRECISION:
-            return f"decimal128({precision},{scale or 0})"
-        # ``NUMBER`` (unbounded) and ``NUMBER(*,0)`` both report
-        # ``data_precision IS NULL`` from ALL_TAB_COLUMNS.  Falling through
-        # to ``double`` here silently loses precision for integers past
-        # 2^53.  Default to the widest fixed-precision decimal Oracle
-        # supports so values round-trip with full fidelity; the column
-        # can still be overridden to ``double`` via per-column config.
-        if precision is None:
-            if scale is None or scale == 0:
-                return f"decimal128({_NUMBER_MAX_PRECISION},0)"
-            return f"decimal128({_NUMBER_MAX_PRECISION},{scale})"
-        return "double"
+        return _number_token(column.data_precision, column.data_scale)
     if data_type in FLOAT_TYPES:
         return "double"
     if data_type in STRING_TYPES or data_type in STRINGIFIED_TYPES:
@@ -122,6 +156,14 @@ _TYPE_SPECIFIC_EXPRESSIONS: dict[str, str] = {
     # by the native ``JSON`` type.  JSON_SERIALIZE renders the value to
     # text and works for both storages.
     "JSON": "JSON_SERIALIZE({column} RETURNING CLOB)",
+    # Time-zone-aware timestamps: a bare ``TO_CHAR`` uses the session's
+    # ``NLS_TIMESTAMP_TZ_FORMAT`` / ``NLS_TIMESTAMP_FORMAT``, so the output
+    # text varies with the environment the staging container happens to
+    # inherit.  Pin an explicit ISO-8601 format model (with full
+    # fractional seconds and, for TSTZ, the region/offset) so the string
+    # representation is deterministic across runs.
+    "TIMESTAMP WITH TIME ZONE": ("TO_CHAR({column}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9 TZR')"),
+    "TIMESTAMP WITH LOCAL TIME ZONE": ("TO_CHAR({column}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')"),
 }
 
 

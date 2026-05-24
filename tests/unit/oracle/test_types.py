@@ -75,11 +75,64 @@ def test_oversized_number_precision_falls_back_to_double() -> None:
     assert oracle_to_arrow_token(col("NUMBER", 40, 2)) == "double"
 
 
-def test_timestamp_with_time_zone_uses_to_char() -> None:
-    """Stringified types without a type-specific template fall back to TO_CHAR()."""
+def test_timestamp_with_time_zone_uses_explicit_format() -> None:
+    """TSTZ pins an explicit ISO format with TZR so output is NLS-independent."""
     column = col("TIMESTAMP WITH TIME ZONE")
     assert oracle_to_arrow_token(column) == "string"
+    assert export_expression(column) == "TO_CHAR(C1, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9 TZR')"
+
+
+def test_timestamp_with_local_time_zone_uses_explicit_format() -> None:
+    """TSLTZ pins an explicit ISO format (no region) so output is NLS-independent."""
+    column = col("TIMESTAMP WITH LOCAL TIME ZONE")
+    assert oracle_to_arrow_token(column) == "string"
+    assert export_expression(column) == "TO_CHAR(C1, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')"
+
+
+def test_interval_still_falls_back_to_bare_to_char() -> None:
+    """Interval types have no explicit template and use bare TO_CHAR()."""
+    column = col("INTERVAL DAY TO SECOND")
     assert export_expression(column) == "TO_CHAR(C1)"
+
+
+# ---------------------------------------------------------------------------
+# NUMBER scale normalisation — scales Oracle allows but Parquet/Avro reject
+# ---------------------------------------------------------------------------
+
+
+def test_negative_scale_small_maps_to_int64() -> None:
+    """NUMBER(10,-2) is an integer multiple of 100; it fits in int64."""
+    assert oracle_to_arrow_token(col("NUMBER", 10, -2)) == "int64"
+
+
+def test_negative_scale_wide_maps_to_scale0_decimal() -> None:
+    """NUMBER(20,-2) needs 22 digits; widen precision and pin scale 0."""
+    assert oracle_to_arrow_token(col("NUMBER", 20, -2)) == "decimal128(22,0)"
+
+
+def test_negative_scale_overflowing_precision_falls_back_to_double() -> None:
+    """NUMBER(38,-10) needs 48 digits > decimal128 max (38) → double."""
+    assert oracle_to_arrow_token(col("NUMBER", 38, -10)) == "double"
+
+
+def test_scale_greater_than_precision_widens_precision() -> None:
+    """NUMBER(2,5) is a pure fraction; precision must be >= scale for decimal128."""
+    assert oracle_to_arrow_token(col("NUMBER", 2, 5)) == "decimal128(5,5)"
+
+
+def test_unbounded_number_with_huge_scale_clamps_scale() -> None:
+    """NUMBER(*, 50) cannot exceed decimal128's 38-digit precision."""
+    assert oracle_to_arrow_token(col("NUMBER", None, 50)) == "decimal128(38,38)"
+
+
+def test_unbounded_number_negative_scale_stays_wide_integer() -> None:
+    """NUMBER(*, -2) keeps full integer fidelity rather than dropping to double."""
+    assert oracle_to_arrow_token(col("NUMBER", None, -2)) == "decimal128(38,0)"
+
+
+def test_scale_equals_precision_is_valid() -> None:
+    """NUMBER(2,2) (e.g. COMMISSION_PCT) is already valid: decimal128(2,2)."""
+    assert oracle_to_arrow_token(col("NUMBER", 2, 2)) == "decimal128(2,2)"
 
 
 def test_float_type_maps_to_double() -> None:
