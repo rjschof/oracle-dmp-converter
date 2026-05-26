@@ -128,6 +128,26 @@ class TestRenderLegacyImportParfile:
         assert "ROWS=Y" in output
         assert "TABLES=(ORDERS)" in output
 
+    def test_data_only_import(self) -> None:
+        """DATA_ONLY=Y supersedes ROWS= to avoid re-importing metadata."""
+        job = LegacyImportJob(
+            connection=_conn(),
+            files=("/dumps/export.dmp",),
+            logfile="imp-data.log",
+            fromuser="SRC",
+            touser="DMP_STAGE",
+            tables=("ORDERS",),
+            data_only=True,
+        )
+        output = render_legacy_import_parfile(job)
+        assert "DATA_ONLY=Y" in output
+        assert "ROWS=" not in output
+        assert "IGNORE=" not in output
+        assert "INDEXES=" not in output
+        assert "GRANTS=" not in output
+        assert "CONSTRAINTS=" not in output
+        assert "TABLES=(ORDERS)" in output
+
     def test_no_tables_filter(self) -> None:
         """No TABLES= line when tables is empty (full schema import)."""
         job = LegacyImportJob(

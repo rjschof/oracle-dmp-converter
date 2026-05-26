@@ -604,6 +604,55 @@ def create_plsql_objects(conn: oracledb.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# DDL: VPD (Virtual Private Database) policies — exercise the VPD cleanup path
+# ---------------------------------------------------------------------------
+
+
+def create_vpd_policies(conn: oracledb.Connection) -> None:
+    """Create a VPD policy function and attach it to HRDATA.EMPLOYEES.
+
+    The policy function always returns ``1=1`` (no filtering) so it does
+    not affect the data visible during export.  Its purpose is to exercise
+    the VPD-cleanup path in the converter: if the policy or its function
+    survive into the staging schema, a subsequent ``imp ROWS=Y`` may
+    trigger ``ORA-28100: policy function does not exist`` because the
+    function body references the staging schema context incorrectly.
+    """
+    with conn.cursor() as cursor:
+        # Standalone policy function owned by HRDATA
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION HRDATA.VPD_EMP_POLICY(
+                p_schema IN VARCHAR2,
+                p_table  IN VARCHAR2
+            ) RETURN VARCHAR2 IS
+            BEGIN
+                RETURN '1=1';
+            END VPD_EMP_POLICY;
+            """
+        )
+    conn.commit()
+    # Attach the policy via DBMS_RLS (must be called as SYSTEM/DBA)
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            BEGIN
+                DBMS_RLS.ADD_POLICY(
+                    object_schema   => 'HRDATA',
+                    object_name     => 'EMPLOYEES',
+                    policy_name     => 'EMP_VPD_POL',
+                    function_schema => 'HRDATA',
+                    policy_function => 'VPD_EMP_POLICY',
+                    statement_types => 'SELECT',
+                    enable          => TRUE
+                );
+            END;
+            """
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # DDL: BEFORE INSERT triggers — fire sequences when PK is NULL
 # ---------------------------------------------------------------------------
 
@@ -1738,12 +1787,19 @@ def insert_audit_extension_data(conn: oracledb.Connection) -> None:
                     # FRAC_SCALE values are < 0.001 (NUMBER(2,5) is a fraction).
                     # FLOAT values stay within Oracle NUMBER range (~1e125) so
                     # oracledb's default NUMBER bind does not overflow.
-                    (1, 10**37, 12345678901234567890, 1.5, 0.0001,
-                     12300, 1234500, 0.00012, 1.2345678901234),
-                    (2, -(10**37), -42, 0, 0.9999,
-                     -4200, -100, 0.00099, 987654321.5),
-                    (3, 1, 0, 1.0e20, 0.5,
-                     0, 500, 0.00001, 0.0009765625),
+                    (
+                        1,
+                        10**37,
+                        12345678901234567890,
+                        1.5,
+                        0.0001,
+                        12300,
+                        1234500,
+                        0.00012,
+                        1.2345678901234,
+                    ),
+                    (2, -(10**37), -42, 0, 0.9999, -4200, -100, 0.00099, 987654321.5),
+                    (3, 1, 0, 1.0e20, 0.5, 0, 500, 0.00001, 0.0009765625),
                 ],
             )
         conn.commit()
@@ -1908,6 +1964,8 @@ def create_sample_database(
         create_indexes(conn)
         LOGGER.info("  Creating PL/SQL objects...")
         create_plsql_objects(conn)
+        LOGGER.info("  Creating VPD policies...")
+        create_vpd_policies(conn)
         LOGGER.info("  Creating triggers...")
         create_triggers(conn)
         LOGGER.info("  Building audit-coverage extensions (DDL)...")

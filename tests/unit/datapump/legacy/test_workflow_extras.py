@@ -224,12 +224,12 @@ class TestImportMetadata:
 
 
 class TestImportChunk:
-    def test_calls_convert_runner_with_rows_true(self, tmp_path: Path) -> None:
+    def test_calls_convert_runner_with_data_only(self, tmp_path: Path) -> None:
         wf = _make_workflow(tmp_path)
         wf.import_chunk("SRC", "STAGE", "ORDERS", "whole", None)
         wf._convert_runner.run_imp.assert_called_once()
         job = wf._convert_runner.run_imp.call_args[0][0]
-        assert job.rows is True
+        assert job.data_only is True
 
 
 class TestImportChunksBatch:

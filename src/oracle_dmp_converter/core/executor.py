@@ -32,6 +32,7 @@ from oracle_dmp_converter.core.staging import (
     disable_foreign_keys,
     disable_triggers,
     drop_vpd_policies,
+    drop_vpd_policy_functions,
 )
 from oracle_dmp_converter.datapump._ddl_parser import parse_missing_tablespace_from_error
 from oracle_dmp_converter.datapump._workflow_base import DumpWorkflow, WorkflowConfig
@@ -428,6 +429,7 @@ class StagingExecutor:
             disable_triggers(conn, stage_schema)
             disable_foreign_keys(conn, stage_schema)
             drop_vpd_policies(conn, stage_schema)
+            drop_vpd_policy_functions(conn, stage_schema)
             apply_byte_to_char(conn, stage_schema)
 
     def inspect_dump(self) -> DumpManifest:

@@ -13,6 +13,7 @@ from oracle_dmp_converter.core.staging import (
     disable_foreign_keys,
     disable_triggers,
     drop_vpd_policies,
+    drop_vpd_policy_functions,
 )
 
 # ---------------------------------------------------------------------------
@@ -182,6 +183,58 @@ class TestDropVpdPolicies:
         conn.cursor.side_effect = [discovery_cursor, bad_cursor, good_cursor]
 
         count = drop_vpd_policies(conn, "MYSCHEMA")
+        assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# drop_vpd_policy_functions
+# ---------------------------------------------------------------------------
+
+
+class TestDropVpdPolicyFunctions:
+    def test_drops_standalone_function(self) -> None:
+        discovery_cursor = _make_cursor([("VPD_EMP_POLICY",)])
+        action_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, action_cursor]
+
+        count = drop_vpd_policy_functions(conn, "MYSCHEMA")
+
+        sql = action_cursor.execute.call_args[0][0]
+        assert "DROP FUNCTION" in sql
+        assert "VPD_EMP_POLICY" in sql
+        assert count == 1
+
+    def test_no_functions_no_drop(self) -> None:
+        cursor = _make_cursor([])
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        count = drop_vpd_policy_functions(conn, "EMPTY")
+
+        assert cursor.execute.call_count == 1  # Only the SELECT
+        assert count == 0
+
+    def test_missing_function_ora_04043_skipped_silently(self) -> None:
+        """ORA-04043 (object does not exist) should be skipped with no warning."""
+        discovery_cursor = _make_cursor([("VPD_GONE",)])
+        missing_cursor = _make_cursor()
+        missing_cursor.execute.side_effect = _make_ora_error(4043)
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, missing_cursor]
+
+        count = drop_vpd_policy_functions(conn, "MYSCHEMA")
+        assert count == 0
+
+    def test_other_error_warns_and_continues(self) -> None:
+        discovery_cursor = _make_cursor([("VPD_BAD",), ("VPD_OK",)])
+        bad_cursor = _make_cursor()
+        bad_cursor.execute.side_effect = _make_ora_error(600)
+        good_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, bad_cursor, good_cursor]
+
+        count = drop_vpd_policy_functions(conn, "MYSCHEMA")
         assert count == 1
 
 

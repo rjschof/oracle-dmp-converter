@@ -219,6 +219,66 @@ def drop_vpd_policies(conn: oracledb.Connection, stage_schema: str) -> int:
     return dropped
 
 
+def drop_vpd_policy_functions(conn: oracledb.Connection, stage_schema: str) -> int:
+    """Drop PL/SQL functions referenced by VPD policies in *stage_schema*.
+
+    VPD policies reference a PL/SQL function that Oracle invokes to produce a
+    predicate.  When a legacy ``imp`` re-imports metadata, it tries to
+    re-attach the policy — and if the function still exists in the staging
+    schema the ``ADD_POLICY`` call succeeds, but the function may reference
+    objects that no longer resolve correctly, leading to ``ORA-28100`` at
+    query time.  Dropping the functions *after* the policies have been removed
+    (see :func:`drop_vpd_policies`) prevents this.
+
+    Only standalone functions owned by *stage_schema* are dropped (i.e.
+    ``PF_OWNER = stage_schema`` and ``PACKAGE IS NULL``).  Packaged policy
+    functions are left alone — dropping an entire package for a single policy
+    function could break other code.
+
+    Returns the number of functions successfully dropped.  ``ORA-04043``
+    (object does not exist) is silently skipped; any other error is logged
+    as a warning and processing continues.
+    """
+    LOGGER.info("Dropping VPD policy functions on staging schema %s", stage_schema)
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT DISTINCT FUNCTION
+            FROM ALL_POLICIES
+            WHERE OBJECT_OWNER = :schema
+              AND PF_OWNER = :schema
+              AND PACKAGE IS NULL
+              AND FUNCTION IS NOT NULL
+            """,
+            schema=stage_schema,
+        )
+        functions = [row[0] for row in cursor.fetchall()]
+    dropped = 0
+    for func_name in functions:
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f'DROP FUNCTION "{stage_schema}"."{func_name}"')
+        except oracledb.DatabaseError as exc:
+            ora_code = exc.args[0].code if exc.args else None
+            if ora_code == 4043:  # ORA-04043: object does not exist
+                LOGGER.debug(
+                    "VPD policy function %s.%s no longer exists, skipping",
+                    stage_schema,
+                    func_name,
+                )
+            else:
+                LOGGER.warning(
+                    "Failed to drop VPD policy function %s.%s: %s",
+                    stage_schema,
+                    func_name,
+                    exc,
+                )
+            continue
+        dropped += 1
+        LOGGER.debug("Dropped VPD policy function %s.%s", stage_schema, func_name)
+    return dropped
+
+
 def dematerialize_mviews(conn: oracledb.Connection, stage_schema: str) -> None:
     """Replace materialised views in *stage_schema* with plain heap tables."""
     with conn.cursor() as cursor:
