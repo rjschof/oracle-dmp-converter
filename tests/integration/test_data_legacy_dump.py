@@ -66,7 +66,16 @@ _EXPECTED_ROWS: dict[str, dict[str, int]] = {
     },
     "FINANCE": {
         "ACCOUNTS": 20,
+        # AUDIT_HOOKS is intentionally empty; its trigger references AUDITLOG.LOG_CHANGE
+        # which compiles INVALID during imp (IMP-00403/IMP-00041/ORA-04043 fixture).
+        "AUDIT_HOOKS": 0,
         "CHECK_NOT_NULL": 5,
+        # MV_ACCOUNT_SNAPSHOT is exported as a regular table (20 rows) by exp and
+        # imported by imp with an ORA-23308 fast-refresh registration failure (fixture).
+        # MLOG$_ACCOUNTS (the underlying MV-log storage) is excluded: imp's indexfile
+        # does not carry full DDL for internal Oracle MV-log tables so it never enters
+        # the plan or conversion report.
+        "MV_ACCOUNT_SNAPSHOT": 20,
         "MV_ACCOUNT_SUMMARY": 20,
         "NUMERIC_EDGE": 3,
         "TRANSACTIONS": 100,
@@ -261,7 +270,19 @@ def test_legacy_plan(shared_work: SimpleNamespace) -> None:
 
 
 def test_legacy_convert(shared_work: SimpleNamespace, tmp_path: Path) -> None:
-    """convert subcommand: produces correct Parquet output and conversion report."""
+    """convert subcommand: produces correct Parquet output and conversion report.
+
+    The dump includes enriched objects that exercise the non-fatal error path:
+    - FINANCE.AUDIT_HOOKS: a table with a cross-schema trigger (TRG_AUDIT_HOOKS_LOG)
+      that references AUDITLOG.LOG_CHANGE. imp does not rewrite PL/SQL body text
+      during FROMUSER/TOUSER translation, so the trigger compiles INVALID in staging.
+    - FINANCE.MV_ACCOUNT_SNAPSHOT: a fast-refresh MV backed by MLOG$_ACCOUNTS. exp
+      does not carry SYS.MLOG$ replication-catalog entries, so the MV is imported as
+      a plain table in staging.
+
+    Both objects are converted without error, confirming that the permissive error
+    handling in the legacy workflow tolerates the non-fatal imp conditions.
+    """
     output_dir = tmp_path / "parquet"
     _reset_state(shared_work.work_dir)
 

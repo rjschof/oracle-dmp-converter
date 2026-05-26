@@ -26,32 +26,66 @@ LOGGER = logging.getLogger(__name__)
 # Error codes that imp may emit but that do not indicate a fatal failure.
 # IMP-00017: statement failed with ORACLE error (object already exists, etc.)
 # IMP-00003: ORACLE error encountered
+# IMP-00041: warning: object altered with compilation warnings
+# IMP-00098: ORACLE error N encountered while importing TABLE DATA
+# IMP-00403: warning: object created with compilation errors
 # ORA-00942: table or view does not exist (object skipped by imp)
 # ORA-01435: user does not exist
+# ORA-04043: object N does not exist
+# ORA-04080: trigger N does not exist
+# ORA-23308: object N of type N does not exist or is invalid
 _NON_FATAL_IMP_CODES: frozenset[str] = frozenset(
-    {"IMP-00017", "IMP-00003", "ORA-00942", "ORA-01435"}
+    {
+        "IMP-00017",
+        "IMP-00003",
+        "IMP-00041",
+        "IMP-00098",
+        "IMP-00403",
+        "ORA-00942",
+        "ORA-01435",
+        "ORA-04043",
+        "ORA-04080",
+        "ORA-23308",
+    }
 )
 
 
-def _only_non_fatal_errors(output: str) -> bool:
-    """Return True if *output* contains IMP/ORA error codes and all of them
-    are in the known non-fatal set.
+def _log_and_classify_imp_errors(output: str, context: str) -> bool:
+    """Log IMP/ORA error codes found in *output* at the appropriate level and
+    return whether the errors are swallowable.
 
-    Legacy ``imp`` is chatty: it routinely reports things like
-    ``ORA-00942: table or view does not exist`` (skipped object) and
-    ``IMP-00017`` (statement-level failure) alongside genuinely fatal errors.
-    Distinguishing the two is intentionally kept at the workflow layer
-    (rather than baked into :class:`LegacyRunner`) because the policy is
-    workflow-shaped: ``import_all_metadata`` accepts dirty output as long as
-    everything that did fail is in :data:`_NON_FATAL_IMP_CODES`, whereas a
-    future caller (e.g. strict re-import for validation) could choose a
-    different tolerance without touching the low-level runner.
+    Legacy ``imp`` exits with status 2 (EX_WARN) for non-fatal conditions and
+    status 1 (EX_FAIL) for genuine failures.  When a :class:`DataPumpError` is
+    raised we scan the output for recognisable IMP/ORA codes:
 
-    An empty match (no error codes found at all) returns False so that
-    unexpected failures without recognisable codes still propagate.
+    * Codes in :data:`_NON_FATAL_IMP_CODES` are logged at INFO — they are
+      expected and benign (e.g. object already exists, user not found).
+    * Codes *not* in the known set are logged at WARNING — they may indicate an
+      unusual condition worth investigating but do not block the conversion.
+    * If **no** IMP/ORA codes are found at all (e.g. a connection failure) the
+      function returns ``False`` so the caller re-raises the original error.
+
+    Returns ``True`` if the errors should be swallowed, ``False`` if the caller
+    should re-raise.
     """
-    found = set(re.findall(r"(IMP-\d+|ORA-\d+)", output))
-    return bool(found) and found.issubset(_NON_FATAL_IMP_CODES)
+    found = frozenset(re.findall(r"(IMP-\d+|ORA-\d+)", output))
+    if not found:
+        return False
+    known = found & _NON_FATAL_IMP_CODES
+    unknown = found - _NON_FATAL_IMP_CODES
+    if known:
+        LOGGER.info(
+            "Non-fatal known IMP/ORA codes during %s: %s",
+            context,
+            ", ".join(sorted(known)),
+        )
+    if unknown:
+        LOGGER.warning(
+            "Non-fatal unknown IMP/ORA codes during %s: %s",
+            context,
+            ", ".join(sorted(unknown)),
+        )
+    return True
 
 
 _INDEXFILE_NAME = "dmpconverter-legacy-discovery.sql"
@@ -228,17 +262,15 @@ class LegacyDumpWorkflow(DumpWorkflow):
             constraints=False,
         )
         try:
-            self._inspect_runner.run_imp(job)
+            output = self._inspect_runner.run_imp(job)
         except DataPumpError as exc:
-            if _only_non_fatal_errors(str(exc)):
-                LOGGER.warning(
-                    "Legacy bulk metadata import for %s completed with non-fatal errors "
-                    "(IMP/ORA codes in output are all known non-fatal): %s",
-                    source_schema,
-                    str(exc)[:400],
-                )
+            if _log_and_classify_imp_errors(str(exc), f"bulk metadata import for {source_schema}"):
                 return
             raise
+        # Exit-code-2 (EX_WARN): run_imp returned without raising.  The base
+        # runner already logged a broad WARNING; classify any IMP/ORA codes found
+        # in the output so known codes are promoted to INFO level.
+        _log_and_classify_imp_errors(output, f"bulk metadata import for {source_schema}")
 
     def import_metadata(self, source_schema: str, stage_schema: str, table: str) -> None:
         """Import table DDL only (``rows=False``) into the staging schema."""
@@ -258,18 +290,14 @@ class LegacyDumpWorkflow(DumpWorkflow):
             constraints=False,
         )
         try:
-            self._inspect_runner.run_imp(job)
+            output = self._inspect_runner.run_imp(job)
         except DataPumpError as exc:
-            if _only_non_fatal_errors(str(exc)):
-                LOGGER.warning(
-                    "Legacy metadata import for %s.%s completed with non-fatal errors "
-                    "(IMP/ORA codes in output are all known non-fatal): %s",
-                    source_schema,
-                    table,
-                    str(exc)[:400],
-                )
+            if _log_and_classify_imp_errors(
+                str(exc), f"metadata import for {source_schema}.{table}"
+            ):
                 return
             raise
+        _log_and_classify_imp_errors(output, f"metadata import for {source_schema}.{table}")
 
     def import_chunk(
         self,

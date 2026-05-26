@@ -47,14 +47,18 @@ def _make_workflow(
     discovery_runner.container = container
     discovery_runner.run_imp_indexfile.return_value = (indexfile_sql, "Import complete")
 
+    inspect_runner = MagicMock()
+    inspect_runner.run_imp.return_value = ""  # default: clean success, no IMP/ORA codes
+    convert_runner = MagicMock()
+    convert_runner.run_imp.return_value = ""
     return LegacyDumpWorkflow(
         credentials=_creds(),
         directory_path="/dumps",
         dumpfiles=("legacy.dmp",),
         discovery_runner=discovery_runner,
         discovery_dir=discovery_dir,
-        inspect_runner=MagicMock(),
-        convert_runner=MagicMock(),
+        inspect_runner=inspect_runner,
+        convert_runner=convert_runner,
     )
 
 
@@ -134,8 +138,11 @@ class TestImportAllMetadata:
         job = wf._inspect_runner.run_imp.call_args[0][0]
         assert job.rows is False
 
-    def test_non_fatal_error_codes_are_swallowed(self, tmp_path: Path) -> None:
-        """A DataPumpError whose message contains only known non-fatal codes must not propagate."""
+    def test_known_codes_are_swallowed_and_logged_at_info(self, tmp_path: Path, caplog) -> None:
+        """A DataPumpError whose message contains only known non-fatal codes must not propagate
+        and must be logged at INFO."""
+        import logging
+
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00003: ORACLE error 942 encountered\n"
@@ -143,17 +150,22 @@ class TestImportAllMetadata:
             "IMP-00017: following statement failed with ORACLE error 1435\n"
             "ORA-01435: user does not exist\n"
         )
-        # Should not raise
-        wf.import_all_metadata("SRC", "STAGE")
+        with caplog.at_level(logging.INFO, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_all_metadata("SRC", "STAGE")  # must not raise
+        assert any(r.levelno == logging.INFO for r in caplog.records)
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
-    def test_fatal_error_code_is_re_raised(self, tmp_path: Path) -> None:
-        """A DataPumpError that contains an unknown code must propagate."""
+    def test_unknown_code_is_swallowed_and_logged_at_warning(self, tmp_path: Path, caplog) -> None:
+        """A DataPumpError containing an unknown IMP/ORA code must be swallowed and logged at WARNING."""
+        import logging
+
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00009: abnormal end of export file\n"
         )
-        with pytest.raises(DataPumpError):
-            wf.import_all_metadata("SRC", "STAGE")
+        with caplog.at_level(logging.WARNING, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_all_metadata("SRC", "STAGE")  # must not raise
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
 
     def test_error_with_no_recognisable_codes_is_re_raised(self, tmp_path: Path) -> None:
         """A DataPumpError with no IMP/ORA codes must propagate."""
@@ -162,14 +174,46 @@ class TestImportAllMetadata:
         with pytest.raises(DataPumpError):
             wf.import_all_metadata("SRC", "STAGE")
 
-    def test_mixed_fatal_and_non_fatal_codes_are_re_raised(self, tmp_path: Path) -> None:
-        """A mix of known and unknown codes must propagate."""
+    def test_mixed_known_and_unknown_codes_are_swallowed_and_logged_at_warning(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """A mix of known and unknown codes must be swallowed and logged at WARNING."""
+        import logging
+
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "ORA-00942: table or view does not exist\nIMP-00009: abnormal end of export file\n"
         )
-        with pytest.raises(DataPumpError):
+        with caplog.at_level(logging.WARNING, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_all_metadata("SRC", "STAGE")  # must not raise
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_exit_code2_known_codes_logged_at_info(self, tmp_path: Path, caplog) -> None:
+        """When run_imp returns (exit-code-2/EX_WARN) with known codes, log at INFO."""
+        import logging
+
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.return_value = (
+            "imp completed with warnings (returncode=2):\n"
+            "IMP-00403: warning: object created with compilation errors\n"
+            "ORA-04043: object AUDITLOG.LOG_CHANGE does not exist\n"
+        )
+        with caplog.at_level(logging.INFO, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_all_metadata("SRC", "STAGE")  # must not raise
+        msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        assert any("IMP-00403" in m for m in msgs)
+        assert any("ORA-04043" in m for m in msgs)
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_exit_code2_clean_output_logs_nothing(self, tmp_path: Path, caplog) -> None:
+        """When run_imp returns with no IMP/ORA codes, nothing extra is logged."""
+        import logging
+
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.return_value = "Import: Release 23.0 ...\nImport complete.\n"
+        with caplog.at_level(logging.INFO, logger="oracle_dmp_converter.datapump.legacy.workflow"):
             wf.import_all_metadata("SRC", "STAGE")
+        assert not caplog.records
 
 
 class TestImportMetadata:
@@ -184,28 +228,51 @@ class TestImportMetadata:
         job = wf._inspect_runner.run_imp.call_args[0][0]
         assert "ORDERS" in job.tables
 
-    def test_non_fatal_error_codes_are_swallowed(self, tmp_path: Path) -> None:
+    def test_known_codes_are_swallowed_and_logged_at_info(self, tmp_path: Path, caplog) -> None:
+        import logging
+
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00017: following statement failed with ORACLE error 942\n"
             "ORA-00942: table or view does not exist\n"
         )
-        # Should not raise
-        wf.import_metadata("SRC", "STAGE", "ORDERS")
+        with caplog.at_level(logging.INFO, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_metadata("SRC", "STAGE", "ORDERS")  # must not raise
+        assert any(r.levelno == logging.INFO for r in caplog.records)
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
-    def test_fatal_error_code_is_re_raised(self, tmp_path: Path) -> None:
+    def test_unknown_code_is_swallowed_and_logged_at_warning(self, tmp_path: Path, caplog) -> None:
+        import logging
+
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00009: abnormal end of export file\n"
         )
-        with pytest.raises(DataPumpError):
-            wf.import_metadata("SRC", "STAGE", "ORDERS")
+        with caplog.at_level(logging.WARNING, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_metadata("SRC", "STAGE", "ORDERS")  # must not raise
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
 
     def test_error_with_no_recognisable_codes_is_re_raised(self, tmp_path: Path) -> None:
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError("Connection refused")
         with pytest.raises(DataPumpError):
             wf.import_metadata("SRC", "STAGE", "ORDERS")
+
+    def test_exit_code2_known_codes_logged_at_info(self, tmp_path: Path, caplog) -> None:
+        """When run_imp returns (exit-code-2/EX_WARN) with known codes, log at INFO."""
+        import logging
+
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.return_value = (
+            "imp completed with warnings (returncode=2):\n"
+            "IMP-00041: warning: object altered with compilation warnings\n"
+            "ORA-04043: object AUDITLOG.LOG_CHANGE does not exist\n"
+        )
+        with caplog.at_level(logging.INFO, logger="oracle_dmp_converter.datapump.legacy.workflow"):
+            wf.import_metadata("SRC", "STAGE", "ORDERS")  # must not raise
+        msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        assert any("IMP-00041" in m for m in msgs)
+        assert any("ORA-04043" in m for m in msgs)
 
 
 class TestImportChunk:

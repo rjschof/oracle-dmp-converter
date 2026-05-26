@@ -14,6 +14,45 @@ This script exercises a broad set of Oracle database features:
   a stored function, procedure, and package (spec + body)
 - Function-based and composite indexes in a dedicated tablespace
 - Cross-schema grants and synonyms (public and private)
+- Non-fatal legacy imp code fixtures (see notes below)
+
+Legacy imp non-fatal code fixtures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Three intentional objects ensure that a fresh ``imp`` run of the legacy dump
+produces specific non-fatal IMP/ORA codes, validating the permissive error-
+handling path in ``datapump/legacy/workflow.py``:
+
+``FINANCE.AUDIT_HOOKS`` + ``FINANCE.TRG_AUDIT_HOOKS_LOG``
+  An AFTER INSERT trigger that calls ``AUDITLOG.LOG_CHANGE``.  In the
+  source DB the reference resolves.  During ``imp FROMUSER=FINANCE
+  TOUSER=DMP_FINANCE`` the staging instance has no ``AUDITLOG`` schema, so
+  the trigger compiles INVALID and ``imp`` emits:
+
+  * ``IMP-00403`` (object created with compilation warnings)
+  * ``IMP-00041`` (object altered with compilation warnings, on the
+    recompile sweep at the end of import)
+  * ``ORA-04043`` (object AUDITLOG.LOG_CHANGE does not exist)
+
+  ``AUDIT_HOOKS`` has no rows, so the invalid trigger never fires during
+  data import — ``IMP-00098`` is *not* produced via this path.
+
+``FINANCE.MV_ACCOUNT_SNAPSHOT`` + materialized view log on ``FINANCE.ACCOUNTS``
+  A fast-refresh (``REFRESH FAST ON DEMAND``) row-level copy of
+  ``FINANCE.ACCOUNTS``, backed by a materialized view log.
+  ``exp`` captures both the ``MLOG$_ACCOUNTS`` log-table and the MV DDL,
+  but does **not** export the internal replication-catalog rows
+  (``SYS.MLOG$``, etc.).  When ``imp`` creates the fast-refresh MV and
+  tries to register it against the imported MV log, the catalog lookup
+  fails and ``imp`` emits:
+
+  * ``ORA-23308`` (object FINANCE.MLOG$_ACCOUNTS of type MATERIALIZED VIEW
+    LOG does not exist or is invalid)
+
+  The internal MV-log management triggers that Oracle auto-creates
+  (``DML_MV_*``) may also be absent after the incomplete catalog setup,
+  producing:
+
+  * ``ORA-04080`` (trigger DML_MV_xxx does not exist)
 
 Two dump files are produced from the same database:
 
@@ -980,6 +1019,39 @@ def create_materialized_view(conn: oracledb.Connection) -> None:
         )
     conn.commit()
 
+    # -----------------------------------------------------------------------
+    # MV log + fast-refresh snapshot MV — non-fatal imp code fixtures
+    #
+    # During legacy imp FROMUSER=FINANCE TOUSER=DMP_FINANCE the internal
+    # replication-catalog rows (SYS.MLOG$ etc.) are not carried over by exp.
+    # imp therefore fails to complete the fast-refresh registration and emits
+    # ORA-23308 (and potentially ORA-04080 for the auto-created DML_MV_*
+    # trigger).  Both are handled as known-non-fatal by the converter.
+    # -----------------------------------------------------------------------
+    _try_ddl(
+        conn,
+        "FINANCE MV log + fast-refresh snapshot (ORA-23308 / ORA-04080 fixture)",
+        [
+            # MV log with rowid + PK columns — required for fast refresh.
+            """
+            CREATE MATERIALIZED VIEW LOG ON FINANCE.ACCOUNTS
+            WITH PRIMARY KEY, ROWID
+                 (EMP_ID, ACCOUNT_TYPE, BALANCE, STATUS, OPENED_DATE)
+            INCLUDING NEW VALUES
+            """,
+            # Simple row-level fast-refresh copy: no aggregation so the
+            # only requirement is the MV log above.
+            """
+            CREATE MATERIALIZED VIEW FINANCE.MV_ACCOUNT_SNAPSHOT
+            BUILD IMMEDIATE
+            REFRESH FAST ON DEMAND
+            AS
+            SELECT ACCOUNT_ID, EMP_ID, ACCOUNT_TYPE, BALANCE, STATUS, OPENED_DATE
+            FROM   FINANCE.ACCOUNTS
+            """,
+        ],
+    )
+
 
 def gather_stats(conn: oracledb.Connection) -> None:
     with conn.cursor() as cursor:
@@ -1014,6 +1086,10 @@ OPTIONAL_AUDIT_TABLES: tuple[tuple[str, str], ...] = (
     ("FINANCE", "TRANSACTION_DETAILS"),
     ("FINANCE", "TRANSACTION_LINES"),
     ("AUDITLOG", "EVENT_STREAM"),
+    # Non-fatal imp code fixtures (IMP-00041/IMP-00403/ORA-04043 via cross-schema
+    # trigger; ORA-23308/ORA-04080 via fast-refresh MV + MV log).
+    ("FINANCE", "AUDIT_HOOKS"),
+    ("FINANCE", "MV_ACCOUNT_SNAPSHOT"),
 )
 
 
@@ -1544,6 +1620,56 @@ def create_audit_tier56_tables(conn: oracledb.Connection) -> None:
         ignored_codes={942},
     )
 
+    # -----------------------------------------------------------------------
+    # Non-fatal imp code fixture: cross-schema trigger
+    #
+    # FINANCE.AUDIT_HOOKS is a minimal hook-registry table whose AFTER INSERT
+    # trigger calls AUDITLOG.LOG_CHANGE.  In the source DB the reference
+    # resolves; during legacy imp FROMUSER=FINANCE TOUSER=DMP_FINANCE the
+    # staging instance has no AUDITLOG schema, so Oracle compiles the trigger
+    # as INVALID and imp emits:
+    #
+    #   IMP-00403  object created with compilation warnings
+    #   IMP-00041  object altered with compilation warnings (recompile sweep)
+    #   ORA-04043  object AUDITLOG.LOG_CHANGE does not exist
+    #
+    # The table intentionally has no data rows so the invalid trigger never
+    # fires during data import (avoiding IMP-00098 / ORA-04098 at that layer).
+    # -----------------------------------------------------------------------
+    _try_ddl(
+        conn,
+        "FINANCE.AUDIT_HOOKS + cross-schema trigger (IMP-00041/IMP-00403/ORA-04043 fixture)",
+        [
+            "DROP TABLE FINANCE.AUDIT_HOOKS PURGE",
+            "CREATE TABLE FINANCE.AUDIT_HOOKS ("
+            "  HOOK_ID   NUMBER(8)    NOT NULL,"
+            "  HOOK_NAME VARCHAR2(60) NOT NULL,"
+            "  CREATED   DATE         DEFAULT SYSDATE,"
+            "  CONSTRAINT AUDIT_HOOKS_PK PRIMARY KEY (HOOK_ID)"
+            ") TABLESPACE COMBINED_DATA",
+            # The trigger body is intentionally NOT rewritten by imp's
+            # FROMUSER/TOUSER translation — AUDITLOG.LOG_CHANGE remains
+            # unqualified in the staging schema where only DMP_AUDITLOG
+            # exists.  This forces the compilation failure that produces the
+            # desired non-fatal error codes.
+            """
+            CREATE OR REPLACE TRIGGER FINANCE.TRG_AUDIT_HOOKS_LOG
+            AFTER INSERT ON FINANCE.AUDIT_HOOKS
+            FOR EACH ROW
+            BEGIN
+                AUDITLOG.LOG_CHANGE(
+                    'FINANCE', 'AUDIT_HOOKS',
+                    TO_CHAR(:NEW.HOOK_ID),
+                    'INSERT'
+                );
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END TRG_AUDIT_HOOKS_LOG;
+            """,
+        ],
+        ignored_codes={942},
+    )
+
 
 def create_audit_comments(conn: oracledb.Connection) -> None:
     """Add COMMENT ON statements so converter metadata round-trip is testable."""
@@ -1738,12 +1864,19 @@ def insert_audit_extension_data(conn: oracledb.Connection) -> None:
                     # FRAC_SCALE values are < 0.001 (NUMBER(2,5) is a fraction).
                     # FLOAT values stay within Oracle NUMBER range (~1e125) so
                     # oracledb's default NUMBER bind does not overflow.
-                    (1, 10**37, 12345678901234567890, 1.5, 0.0001,
-                     12300, 1234500, 0.00012, 1.2345678901234),
-                    (2, -(10**37), -42, 0, 0.9999,
-                     -4200, -100, 0.00099, 987654321.5),
-                    (3, 1, 0, 1.0e20, 0.5,
-                     0, 500, 0.00001, 0.0009765625),
+                    (
+                        1,
+                        10**37,
+                        12345678901234567890,
+                        1.5,
+                        0.0001,
+                        12300,
+                        1234500,
+                        0.00012,
+                        1.2345678901234,
+                    ),
+                    (2, -(10**37), -42, 0, 0.9999, -4200, -100, 0.00099, 987654321.5),
+                    (3, 1, 0, 1.0e20, 0.5, 0, 500, 0.00001, 0.0009765625),
                 ],
             )
         conn.commit()
