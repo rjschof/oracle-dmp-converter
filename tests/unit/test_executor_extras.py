@@ -160,12 +160,14 @@ class TestApplyStagingFixups:
             patch("oracle_dmp_converter.core.executor.dematerialize_mviews") as m1,
             patch("oracle_dmp_converter.core.executor.disable_triggers") as m2,
             patch("oracle_dmp_converter.core.executor.drop_vpd_policies") as m3,
+            patch("oracle_dmp_converter.core.executor.drop_vpd_policy_functions") as m3b,
             patch("oracle_dmp_converter.core.executor.apply_byte_to_char") as m4,
         ):
             executor._apply_staging_fixups("MYSCHEMA")
         m1.assert_called_once()
         m2.assert_called_once()
         m3.assert_called_once()
+        m3b.assert_called_once()
         m4.assert_called_once()
 
 

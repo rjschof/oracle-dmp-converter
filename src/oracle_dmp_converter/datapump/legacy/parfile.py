@@ -73,6 +73,10 @@ class LegacyImportJob:
     # When True the import replaces an existing table; when False it
     # appends to (or skips) an existing table.
     ignore: bool = True
+    # When True, emit ``DATA_ONLY=Y`` instead of ``ROWS=Y`` so that
+    # legacy ``imp`` imports row data without re-applying metadata
+    # objects such as VPD policies, triggers, or grants.
+    data_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,7 +128,15 @@ def render_legacy_import_parfile(job: LegacyImportJob) -> str:
         f"LOG={job.logfile}",
         f"FROMUSER={job.fromuser}",
         f"TOUSER={job.touser}",
-        f"ROWS={'Y' if job.rows else 'N'}",
+    ]
+    if job.data_only:
+        # DATA_ONLY=Y imports row data without re-applying metadata
+        # objects (VPD policies, triggers, grants, etc.).  It supersedes
+        # the ROWS= parameter.
+        lines.append("DATA_ONLY=Y")
+    else:
+        lines.append(f"ROWS={'Y' if job.rows else 'N'}")
+    lines += [
         f"INDEXES={'Y' if job.indexes else 'N'}",
         f"GRANTS={'Y' if job.grants else 'N'}",
         f"CONSTRAINTS={'Y' if job.constraints else 'N'}",

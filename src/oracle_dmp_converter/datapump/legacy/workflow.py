@@ -313,6 +313,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
             indexes=False,
             grants=False,
             constraints=False,
+            data_only=True,
         )
         self._convert_runner.run_imp(job)
 
@@ -370,6 +371,7 @@ class LegacyDumpWorkflow(DumpWorkflow):
                 indexes=False,
                 grants=False,
                 constraints=False,
+                data_only=True,
             )
             self._convert_runner.run_imp(job)
 
