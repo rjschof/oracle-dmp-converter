@@ -143,25 +143,43 @@ def disable_triggers(conn: oracledb.Connection, stage_schema: str) -> int:
 
 
 def drop_vpd_policies(conn: oracledb.Connection, stage_schema: str) -> int:
-    """Drop every DBMS_RLS policy on tables in *stage_schema*.
+    """Drop every DBMS_RLS policy on tables in *stage_schema*, plus their backing functions.
+
+    The policy backing function (or package.function) is queried from
+    ``ALL_POLICIES`` alongside each policy and dropped after every policy has
+    been removed.  Oracle does not validate the predicate-function reference
+    at ``ADD_POLICY`` time, so a stale policy pointing at a missing function
+    yields ``ORA-28100`` on the next ``SELECT`` — dropping the functions here
+    ensures the metadata-import phase leaves no dangling references for
+    chunk-data imports to trip over.
 
     Returns the number of policies successfully dropped.  Missing policies
-    (ORA-28102) are skipped silently; any other error is logged as a warning
-    and processing continues.
+    (ORA-28102) and missing functions/packages (ORA-04043) are skipped
+    silently; any other error is logged as a warning and processing
+    continues.
     """
     LOGGER.info("Dropping VPD policies on staging schema %s", stage_schema)
     with conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT OBJECT_NAME, POLICY_NAME, POLICY_GROUP
+            SELECT OBJECT_NAME, POLICY_NAME, POLICY_GROUP,
+                   PF_OWNER, PACKAGE, FUNCTION
             FROM ALL_POLICIES
             WHERE OBJECT_OWNER = :schema
             """,
             schema=stage_schema,
         )
         policies = cursor.fetchall()
+    # Collect backing functions/packages to drop after the policy loop so a
+    # single function shared by several policies is dropped only once.
+    packages_to_drop: set[tuple[str, str]] = set()
+    standalone_funcs_to_drop: set[tuple[str, str]] = set()
     dropped = 0
-    for object_name, policy_name, policy_group in policies:
+    for object_name, policy_name, policy_group, pf_owner, package, function in policies:
+        if pf_owner and package:
+            packages_to_drop.add((pf_owner, package))
+        elif pf_owner and function:
+            standalone_funcs_to_drop.add((pf_owner, function))
         try:
             with conn.cursor() as cursor:
                 if policy_group and policy_group != "SYS_DEFAULT":
@@ -216,7 +234,29 @@ def drop_vpd_policies(conn: oracledb.Connection, stage_schema: str) -> int:
             continue
         dropped += 1
         LOGGER.debug("Dropped VPD policy %s on %s.%s", policy_name, stage_schema, object_name)
+    for owner, package in sorted(packages_to_drop):
+        _drop_policy_object(conn, owner, package, kind="PACKAGE")
+    for owner, function in sorted(standalone_funcs_to_drop):
+        _drop_policy_object(conn, owner, function, kind="FUNCTION")
     return dropped
+
+
+def _drop_policy_object(
+    conn: oracledb.Connection, owner: str, name: str, *, kind: str
+) -> None:
+    """Drop a VPD policy backing PL/SQL object, tolerating ORA-04043 absences."""
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(f'DROP {kind} "{owner}"."{name}"')
+    except oracledb.DatabaseError as exc:
+        ora_code = exc.args[0].code if exc.args else None
+        # ORA-04043: object does not exist
+        if ora_code == 4043:
+            LOGGER.debug("VPD policy %s %s.%s already absent, skipping", kind, owner, name)
+            return
+        LOGGER.warning("Failed to drop VPD policy %s %s.%s: %s", kind, owner, name, exc)
+        return
+    LOGGER.debug("Dropped VPD policy %s %s.%s", kind, owner, name)
 
 
 def dematerialize_mviews(conn: oracledb.Connection, stage_schema: str) -> None:

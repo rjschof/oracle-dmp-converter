@@ -73,6 +73,17 @@ class LegacyImportJob:
     # When True the import replaces an existing table; when False it
     # appends to (or skips) an existing table.
     ignore: bool = True
+    # When True emit ``DATA_ONLY=Y``, which suppresses ALL metadata DDL
+    # (table creates, indexes, triggers, DBMS_RLS policy calls, …) and
+    # loads only row data into already-existing tables.  Used by the
+    # chunk-import workflow: the metadata-import phase has already
+    # created all objects, and re-running ``DBMS_RLS.ADD_POLICY`` per
+    # chunk would re-establish stale VPD policies pointing at functions
+    # the staging schema does not have, raising ORA-28100 on the next
+    # SELECT.  Note: ``DATA_ONLY=Y`` is incompatible with ``IGNORE=Y``
+    # (IMP-00402); when ``data_only`` is True the renderer omits the
+    # ``IGNORE`` line entirely.
+    data_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -128,8 +139,13 @@ def render_legacy_import_parfile(job: LegacyImportJob) -> str:
         f"INDEXES={'Y' if job.indexes else 'N'}",
         f"GRANTS={'Y' if job.grants else 'N'}",
         f"CONSTRAINTS={'Y' if job.constraints else 'N'}",
-        f"IGNORE={'Y' if job.ignore else 'N'}",
     ]
+    # IMP-00402: combining DATA_ONLY=Y with IGNORE=Y aborts the import
+    # before any rows are loaded, so omit IGNORE entirely in DATA_ONLY mode.
+    if not job.data_only:
+        lines.append(f"IGNORE={'Y' if job.ignore else 'N'}")
+    if job.data_only:
+        lines.append("DATA_ONLY=Y")
     if job.tables:
         tables_list = ", ".join(job.tables)
         lines.append(f"TABLES=({tables_list})")

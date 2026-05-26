@@ -126,7 +126,9 @@ class TestDisableTriggers:
 
 class TestDropVpdPolicies:
     def test_drops_non_grouped_policy(self) -> None:
-        discovery_cursor = _make_cursor([("ORDERS", "POL1", "SYS_DEFAULT")])
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL1", "SYS_DEFAULT", None, None, None)]
+        )
         action_cursor = _make_cursor()
         conn = MagicMock()
         conn.cursor.side_effect = [discovery_cursor, action_cursor]
@@ -139,7 +141,9 @@ class TestDropVpdPolicies:
         assert count == 1
 
     def test_drops_grouped_policy(self) -> None:
-        discovery_cursor = _make_cursor([("ORDERS", "POL1", "MYGROUP")])
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL1", "MYGROUP", None, None, None)]
+        )
         action_cursor = _make_cursor()
         conn = MagicMock()
         conn.cursor.side_effect = [discovery_cursor, action_cursor]
@@ -162,7 +166,9 @@ class TestDropVpdPolicies:
 
     def test_missing_policy_ora_28102_skipped_silently(self) -> None:
         """ORA-28102 (policy does not exist) should be skipped with no warning."""
-        discovery_cursor = _make_cursor([("ORDERS", "POL_GONE", "SYS_DEFAULT")])
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL_GONE", "SYS_DEFAULT", None, None, None)]
+        )
         missing_cursor = _make_cursor()
         missing_cursor.execute.side_effect = _make_ora_error(28102)
         conn = MagicMock()
@@ -173,7 +179,10 @@ class TestDropVpdPolicies:
 
     def test_other_error_warns_and_continues(self) -> None:
         discovery_cursor = _make_cursor(
-            [("ORDERS", "POL_BAD", "SYS_DEFAULT"), ("ORDERS", "POL_OK", "SYS_DEFAULT")]
+            [
+                ("ORDERS", "POL_BAD", "SYS_DEFAULT", None, None, None),
+                ("ORDERS", "POL_OK", "SYS_DEFAULT", None, None, None),
+            ]
         )
         bad_cursor = _make_cursor()
         bad_cursor.execute.side_effect = _make_ora_error(600)
@@ -183,6 +192,103 @@ class TestDropVpdPolicies:
 
         count = drop_vpd_policies(conn, "MYSCHEMA")
         assert count == 1
+
+    def test_drops_standalone_policy_function(self) -> None:
+        """After dropping the policy, the associated standalone function must be dropped."""
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL1", "SYS_DEFAULT", "VPDSEC", None, "GET_PREDICATE")]
+        )
+        policy_cursor = _make_cursor()
+        func_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, policy_cursor, func_cursor]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+
+        func_sql = func_cursor.execute.call_args[0][0]
+        assert func_sql == 'DROP FUNCTION "VPDSEC"."GET_PREDICATE"'
+        assert count == 1
+
+    def test_drops_policy_package(self) -> None:
+        """A policy backed by a packaged function drops the whole package."""
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL1", "SYS_DEFAULT", "VPDSEC", "SEC_PKG", "GET_PREDICATE")]
+        )
+        policy_cursor = _make_cursor()
+        pkg_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, policy_cursor, pkg_cursor]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+
+        pkg_sql = pkg_cursor.execute.call_args[0][0]
+        assert pkg_sql == 'DROP PACKAGE "VPDSEC"."SEC_PKG"'
+        assert count == 1
+
+    def test_shared_function_dropped_once(self) -> None:
+        """Two policies sharing the same backing function should produce one DROP."""
+        discovery_cursor = _make_cursor(
+            [
+                ("ORDERS", "POL_A", "SYS_DEFAULT", "VPDSEC", None, "GET_PREDICATE"),
+                ("INVOICES", "POL_B", "SYS_DEFAULT", "VPDSEC", None, "GET_PREDICATE"),
+            ]
+        )
+        pol_a_cursor = _make_cursor()
+        pol_b_cursor = _make_cursor()
+        func_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [
+            discovery_cursor,
+            pol_a_cursor,
+            pol_b_cursor,
+            func_cursor,
+        ]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+
+        # Only one extra cursor was consumed for the function drop.
+        assert conn.cursor.call_count == 4
+        assert 'DROP FUNCTION "VPDSEC"."GET_PREDICATE"' in func_cursor.execute.call_args[0][0]
+        assert count == 2
+
+    def test_missing_function_ora_04043_skipped_silently(self) -> None:
+        """ORA-04043 from the function drop must not raise."""
+        discovery_cursor = _make_cursor(
+            [("ORDERS", "POL1", "SYS_DEFAULT", "VPDSEC", None, "GET_PREDICATE")]
+        )
+        policy_cursor = _make_cursor()
+        func_cursor = _make_cursor()
+        func_cursor.execute.side_effect = _make_ora_error(4043)
+        conn = MagicMock()
+        conn.cursor.side_effect = [discovery_cursor, policy_cursor, func_cursor]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+        assert count == 1
+
+    def test_function_drop_other_error_warns_and_continues(self) -> None:
+        """Non-04043 errors on the function drop should not fail the call."""
+        discovery_cursor = _make_cursor(
+            [
+                ("ORDERS", "POL1", "SYS_DEFAULT", "VPDSEC", None, "FUNC_A"),
+                ("INVOICES", "POL2", "SYS_DEFAULT", "VPDSEC", None, "FUNC_B"),
+            ]
+        )
+        policy_a_cursor = _make_cursor()
+        policy_b_cursor = _make_cursor()
+        func_a_cursor = _make_cursor()
+        func_a_cursor.execute.side_effect = _make_ora_error(1031)  # insufficient privs
+        func_b_cursor = _make_cursor()
+        conn = MagicMock()
+        conn.cursor.side_effect = [
+            discovery_cursor,
+            policy_a_cursor,
+            policy_b_cursor,
+            func_a_cursor,
+            func_b_cursor,
+        ]
+
+        count = drop_vpd_policies(conn, "MYSCHEMA")
+        assert count == 2
 
 
 # ---------------------------------------------------------------------------

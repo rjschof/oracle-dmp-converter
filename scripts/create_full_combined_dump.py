@@ -185,6 +185,11 @@ def reset_schemas(conn: oracledb.Connection) -> None:
         # honoured during MV creation in another schema).
         cursor.execute("GRANT CREATE MATERIALIZED VIEW TO FINANCE")
         cursor.execute("GRANT CREATE TABLE TO FINANCE")
+        # EXEMPT ACCESS POLICY lets SYSTEM bypass the VPD policy attached
+        # to FINANCE.ACCOUNTS during expdp; without this, expdp emits
+        # ORA-39181 ("only partial table data may be exported") and exits
+        # with returncode 5 even though all rows are in fact exported.
+        cursor.execute("GRANT EXEMPT ACCESS POLICY TO SYSTEM")
     conn.commit()
 
 
@@ -601,6 +606,130 @@ def create_plsql_objects(conn: oracledb.Connection) -> None:
             """
         )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# DDL: VPD (Virtual Private Database) policy
+# ---------------------------------------------------------------------------
+
+
+def create_vpd_policies(conn: oracledb.Connection) -> None:
+    """Attach a DBMS_RLS policy to FINANCE.ACCOUNTS for fixture coverage.
+
+    Why this exists in the fixture:
+
+    * Data Pump (``expdp``) serialises ``DBMS_RLS.ADD_POLICY`` as
+      ``RLS_POLICY`` DDL inside the dump.  When ``impdp`` replays that
+      DDL into a staging schema where the predicate function is absent
+      (or is invalid in the new owner's namespace), every subsequent
+      ``SELECT`` against the staged table raises ``ORA-28100: VPD
+      policy function does not exist``.  The converter's
+      ``core/staging.drop_vpd_policies()`` strips the policy *and* its
+      backing function before chunk imports replay any data.
+    * Legacy ``exp`` (with ``EXEMPT ACCESS POLICY`` granted to the
+      exporting user) likewise serialises the ``DBMS_RLS.ADD_POLICY``
+      call into the dump, so ``imp`` replays it and the same cleanup
+      logic applies to legacy imports.
+
+    The predicate is intentionally ``'1=1'`` so the policy does not
+    filter any rows — integration tests that assert
+    ``ACCOUNTS == 20 rows`` remain valid while still serialising the
+    ADD_POLICY DDL into both dumps.
+    """
+    _try_ddl(
+        conn,
+        "FINANCE.SEC_ACCOUNT_PREDICATE policy function",
+        [
+            """
+            CREATE OR REPLACE FUNCTION FINANCE.SEC_ACCOUNT_PREDICATE(
+                p_schema IN VARCHAR2,
+                p_object IN VARCHAR2
+            ) RETURN VARCHAR2 AS
+            BEGIN
+                RETURN '1=1';
+            END SEC_ACCOUNT_PREDICATE;
+            """,
+        ],
+    )
+    # Drop any pre-existing policy with the same name (re-runs of the
+    # fixture build).  ORA-28102: policy does not exist is silenced.
+    _try_ddl(
+        conn,
+        "drop pre-existing SEC_ACCOUNTS_ACTIVE policy",
+        [
+            """
+            BEGIN
+                DBMS_RLS.DROP_POLICY(
+                    object_schema => 'FINANCE',
+                    object_name   => 'ACCOUNTS',
+                    policy_name   => 'SEC_ACCOUNTS_ACTIVE'
+                );
+            END;
+            """,
+        ],
+        ignored_codes={28102},
+    )
+    _try_ddl(
+        conn,
+        "attach SEC_ACCOUNTS_ACTIVE policy on FINANCE.ACCOUNTS",
+        [
+            """
+            BEGIN
+                DBMS_RLS.ADD_POLICY(
+                    object_schema   => 'FINANCE',
+                    object_name     => 'ACCOUNTS',
+                    policy_name     => 'SEC_ACCOUNTS_ACTIVE',
+                    function_schema => 'FINANCE',
+                    policy_function => 'SEC_ACCOUNT_PREDICATE'
+                );
+            END;
+            """,
+        ],
+    )
+
+
+def drop_vpd_policies(conn: oracledb.Connection) -> None:
+    """Detach SEC_ACCOUNTS_ACTIVE before the legacy export.
+
+    Original Export (``exp``) was desupported in Oracle Database 11.2
+    and is shipped in 23ai *only* as a downgrade-conversion tool for
+    SYS-owned operations (see
+    https://docs.oracle.com/en/database/oracle/oracle-database/23/sutil/oracle-original-export-utility.html).
+    The 23ai ``exp`` binary silently skips any table that has an active
+    VPD/RLS policy attached, even when the exporting user has been
+    granted ``EXEMPT ACCESS POLICY``.  Verified empirically: with the
+    policy attached, ``FINANCE.ACCOUNTS`` is omitted from the legacy
+    dump entirely (no row in the export log, no error).
+
+    Full-featured ``exp`` binaries from 11.2 and earlier honour
+    ``EXEMPT ACCESS POLICY`` and serialise ``DBMS_RLS.ADD_POLICY`` into
+    the dump, which is why production legacy dumps captured on older
+    Oracle versions can contain both VPD DDL and the table data.  Our
+    test container cannot reproduce that, so we detach the policy
+    *after* the modern dump (which captures it as ``RLS_POLICY`` DDL)
+    and *before* the legacy export so the legacy fixture still
+    contains ``FINANCE.ACCOUNTS`` rows.  The converter's
+    ``core/staging.drop_vpd_policies()`` cleanup is format-independent
+    — it queries ``ALL_POLICIES`` after import — so the modern
+    fixture exercises the end-to-end policy-cleanup code path that
+    matters for production legacy dumps with VPD DDL.
+    """
+    _try_ddl(
+        conn,
+        "drop SEC_ACCOUNTS_ACTIVE policy before legacy export",
+        [
+            """
+            BEGIN
+                DBMS_RLS.DROP_POLICY(
+                    object_schema => 'FINANCE',
+                    object_name   => 'ACCOUNTS',
+                    policy_name   => 'SEC_ACCOUNTS_ACTIVE'
+                );
+            END;
+            """,
+        ],
+        ignored_codes={28102},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1926,6 +2055,13 @@ def create_sample_database(
         create_audit_comments(conn)
         LOGGER.info("  Creating materialized view...")
         create_materialized_view(conn)
+        # VPD policy is installed last so the materialized-view BUILD
+        # IMMEDIATE step above is not blocked by ORA-30372 (fine-grain
+        # access policy conflicts with materialized view).  Subsequent
+        # exports still serialise the DBMS_RLS.ADD_POLICY call into the
+        # dump because the policy is attached before the export runs.
+        LOGGER.info("  Creating VPD policies...")
+        create_vpd_policies(conn)
         LOGGER.info("  Gathering statistics...")
         gather_stats(conn)
 
@@ -2293,6 +2429,13 @@ def main() -> None:
 
         LOGGER.info("Exporting Data Pump (modern) dump...")
         export_modern_dump(container=container, admin=admin, output_dir=output_dir)
+
+        # 23ai's `exp` silently skips VPD-protected tables even with
+        # EXEMPT ACCESS POLICY (see drop_vpd_policies docstring). Detach
+        # the policy so the legacy dump contains FINANCE.ACCOUNTS data.
+        LOGGER.info("Detaching VPD policy before legacy export (23ai exp limitation)...")
+        with connect_admin(admin) as conn:
+            drop_vpd_policies(conn)
 
         LOGGER.info("Exporting legacy exp dump...")
         export_legacy_dump(container=container, admin=admin, output_dir=output_dir)

@@ -313,6 +313,12 @@ class LegacyDumpWorkflow(DumpWorkflow):
             indexes=False,
             grants=False,
             constraints=False,
+            # Metadata DDL has already been imported in the inspect phase;
+            # re-executing DBMS_RLS.ADD_POLICY from the dump here would
+            # re-attach VPD policies pointing at functions the staging
+            # schema does not host, raising ORA-28100 on subsequent
+            # SELECTs.  DATA_ONLY=Y suppresses all metadata DDL.
+            data_only=True,
         )
         self._convert_runner.run_imp(job)
 
@@ -370,6 +376,10 @@ class LegacyDumpWorkflow(DumpWorkflow):
                 indexes=False,
                 grants=False,
                 constraints=False,
+                # See import_chunk(): DATA_ONLY=Y avoids re-running
+                # DBMS_RLS.ADD_POLICY and other metadata DDL that would
+                # otherwise leave dangling VPD references in staging.
+                data_only=True,
             )
             self._convert_runner.run_imp(job)
 

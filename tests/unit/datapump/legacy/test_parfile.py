@@ -152,6 +152,47 @@ class TestRenderLegacyImportParfile:
         output = render_legacy_import_parfile(job)
         assert "IGNORE=N" in output
 
+    def test_data_only_default_false_emits_no_data_only_line(self) -> None:
+        job = LegacyImportJob(
+            connection=_conn(),
+            files=("/dumps/export.dmp",),
+            logfile="imp.log",
+            fromuser="SRC",
+            touser="DMP_STAGE",
+        )
+        output = render_legacy_import_parfile(job)
+        assert "DATA_ONLY" not in output
+        assert "IGNORE=Y" in output
+
+    def test_data_only_true_emits_data_only_y_and_suppresses_ignore(self) -> None:
+        """DATA_ONLY=Y is incompatible with IGNORE=Y (IMP-00402)."""
+        job = LegacyImportJob(
+            connection=_conn(),
+            files=("/dumps/export.dmp",),
+            logfile="imp.log",
+            fromuser="SRC",
+            touser="DMP_STAGE",
+            data_only=True,
+        )
+        output = render_legacy_import_parfile(job)
+        assert "DATA_ONLY=Y" in output
+        # IGNORE must be omitted entirely (even IGNORE=N would trigger IMP-00402).
+        assert "IGNORE" not in output
+
+    def test_data_only_true_with_ignore_false_still_omits_ignore(self) -> None:
+        job = LegacyImportJob(
+            connection=_conn(),
+            files=("/dumps/export.dmp",),
+            logfile="imp.log",
+            fromuser="SRC",
+            touser="DMP_STAGE",
+            ignore=False,
+            data_only=True,
+        )
+        output = render_legacy_import_parfile(job)
+        assert "DATA_ONLY=Y" in output
+        assert "IGNORE" not in output
+
     def test_multiple_dump_files(self) -> None:
         job = LegacyImportJob(
             connection=_conn(),
