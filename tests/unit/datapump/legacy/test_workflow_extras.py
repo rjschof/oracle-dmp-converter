@@ -134,8 +134,8 @@ class TestImportAllMetadata:
         job = wf._inspect_runner.run_imp.call_args[0][0]
         assert job.rows is False
 
-    def test_non_fatal_error_codes_are_swallowed(self, tmp_path: Path) -> None:
-        """A DataPumpError whose message contains only known non-fatal codes must not propagate."""
+    def test_known_non_fatal_codes_are_swallowed(self, tmp_path: Path) -> None:
+        """A DataPumpError with only known non-fatal codes must not propagate."""
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00003: ORACLE error 942 encountered\n"
@@ -146,14 +146,28 @@ class TestImportAllMetadata:
         # Should not raise
         wf.import_all_metadata("SRC", "STAGE")
 
-    def test_fatal_error_code_is_re_raised(self, tmp_path: Path) -> None:
-        """A DataPumpError that contains an unknown code must propagate."""
+    def test_new_non_fatal_codes_are_swallowed(self, tmp_path: Path) -> None:
+        """Newly added non-fatal codes (IMP-00098, IMP-00041, etc.) must not propagate."""
+        wf = _make_workflow(tmp_path)
+        wf._inspect_runner.run_imp.side_effect = DataPumpError(
+            "IMP-00098: some informational error\n"
+            "IMP-00041: Warning: object created with compilation warnings\n"
+            "IMP-00403: Warning: object already exists\n"
+            "ORA-04043: object does not exist\n"
+            "ORA-04080: trigger does not exist\n"
+            "ORA-23308: materialized view does not exist\n"
+        )
+        # Should not raise
+        wf.import_all_metadata("SRC", "STAGE")
+
+    def test_unknown_code_is_swallowed_with_warning(self, tmp_path: Path) -> None:
+        """A DataPumpError with an unknown IMP/ORA code must not propagate."""
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00009: abnormal end of export file\n"
         )
-        with pytest.raises(DataPumpError):
-            wf.import_all_metadata("SRC", "STAGE")
+        # Should not raise — permissive handling
+        wf.import_all_metadata("SRC", "STAGE")
 
     def test_error_with_no_recognisable_codes_is_re_raised(self, tmp_path: Path) -> None:
         """A DataPumpError with no IMP/ORA codes must propagate."""
@@ -162,14 +176,14 @@ class TestImportAllMetadata:
         with pytest.raises(DataPumpError):
             wf.import_all_metadata("SRC", "STAGE")
 
-    def test_mixed_fatal_and_non_fatal_codes_are_re_raised(self, tmp_path: Path) -> None:
-        """A mix of known and unknown codes must propagate."""
+    def test_mixed_known_and_unknown_codes_are_swallowed(self, tmp_path: Path) -> None:
+        """A mix of known and unknown codes must not propagate."""
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "ORA-00942: table or view does not exist\nIMP-00009: abnormal end of export file\n"
         )
-        with pytest.raises(DataPumpError):
-            wf.import_all_metadata("SRC", "STAGE")
+        # Should not raise — permissive handling
+        wf.import_all_metadata("SRC", "STAGE")
 
 
 class TestImportMetadata:
@@ -184,7 +198,7 @@ class TestImportMetadata:
         job = wf._inspect_runner.run_imp.call_args[0][0]
         assert "ORDERS" in job.tables
 
-    def test_non_fatal_error_codes_are_swallowed(self, tmp_path: Path) -> None:
+    def test_known_non_fatal_codes_are_swallowed(self, tmp_path: Path) -> None:
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00017: following statement failed with ORACLE error 942\n"
@@ -193,13 +207,14 @@ class TestImportMetadata:
         # Should not raise
         wf.import_metadata("SRC", "STAGE", "ORDERS")
 
-    def test_fatal_error_code_is_re_raised(self, tmp_path: Path) -> None:
+    def test_unknown_code_is_swallowed_with_warning(self, tmp_path: Path) -> None:
+        """A DataPumpError with an unknown IMP/ORA code must not propagate."""
         wf = _make_workflow(tmp_path)
         wf._inspect_runner.run_imp.side_effect = DataPumpError(
             "IMP-00009: abnormal end of export file\n"
         )
-        with pytest.raises(DataPumpError):
-            wf.import_metadata("SRC", "STAGE", "ORDERS")
+        # Should not raise — permissive handling
+        wf.import_metadata("SRC", "STAGE", "ORDERS")
 
     def test_error_with_no_recognisable_codes_is_re_raised(self, tmp_path: Path) -> None:
         wf = _make_workflow(tmp_path)
