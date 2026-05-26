@@ -271,7 +271,13 @@ def make_modern_runners(
     * *convert_runner* writes parfiles to ``work_dir/convert/parfiles/``
       and handles data-importing operations.
     """
-    discovery_runner = DataPumpRunner(container, work_dir / "discovery" / "parfiles")  # type: ignore[arg-type]
-    inspect_runner = DataPumpRunner(container, work_dir / "inspect" / "parfiles")  # type: ignore[arg-type]
-    convert_runner = DataPumpRunner(container, work_dir / "convert" / "parfiles")  # type: ignore[arg-type]
+    discovery_runner = DataPumpRunner(  # type: ignore[arg-type]
+        container, work_dir / "discovery" / "parfiles", keep_parfiles=True
+    )
+    inspect_runner = DataPumpRunner(  # type: ignore[arg-type]
+        container, work_dir / "inspect" / "parfiles", keep_parfiles=True
+    )
+    convert_runner = DataPumpRunner(  # type: ignore[arg-type]
+        container, work_dir / "convert" / "parfiles", keep_parfiles=True
+    )
     return discovery_runner, inspect_runner, convert_runner
