@@ -24,34 +24,55 @@ from oracle_dmp_converter.oracle.identifiers import oracle_identifier
 LOGGER = logging.getLogger(__name__)
 
 # Error codes that imp may emit but that do not indicate a fatal failure.
-# IMP-00017: statement failed with ORACLE error (object already exists, etc.)
 # IMP-00003: ORACLE error encountered
+# IMP-00017: statement failed with ORACLE error (object already exists, etc.)
+# IMP-00041: Warning: object created with compilation warnings
+# IMP-00098: ORACLE error (informational, e.g. privilege issue on non-critical object)
+# IMP-00403: Warning: object already exists
 # ORA-00942: table or view does not exist (object skipped by imp)
 # ORA-01435: user does not exist
+# ORA-04043: object does not exist
+# ORA-04080: trigger does not exist
+# ORA-23308: materialized view does not exist
 _NON_FATAL_IMP_CODES: frozenset[str] = frozenset(
-    {"IMP-00017", "IMP-00003", "ORA-00942", "ORA-01435"}
+    {
+        "IMP-00003",
+        "IMP-00017",
+        "IMP-00041",
+        "IMP-00098",
+        "IMP-00403",
+        "ORA-00942",
+        "ORA-01435",
+        "ORA-04043",
+        "ORA-04080",
+        "ORA-23308",
+    }
 )
 
 
-def _only_non_fatal_errors(output: str) -> bool:
-    """Return True if *output* contains IMP/ORA error codes and all of them
-    are in the known non-fatal set.
+def _classify_imp_errors(output: str) -> tuple[bool, frozenset[str], frozenset[str]]:
+    """Classify IMP/ORA error codes found in *output*.
 
-    Legacy ``imp`` is chatty: it routinely reports things like
-    ``ORA-00942: table or view does not exist`` (skipped object) and
-    ``IMP-00017`` (statement-level failure) alongside genuinely fatal errors.
-    Distinguishing the two is intentionally kept at the workflow layer
-    (rather than baked into :class:`LegacyRunner`) because the policy is
-    workflow-shaped: ``import_all_metadata`` accepts dirty output as long as
-    everything that did fail is in :data:`_NON_FATAL_IMP_CODES`, whereas a
-    future caller (e.g. strict re-import for validation) could choose a
-    different tolerance without touching the low-level runner.
+    Returns ``(has_codes, known_nonfatal, unknown)`` where:
 
-    An empty match (no error codes found at all) returns False so that
-    unexpected failures without recognisable codes still propagate.
+    * *has_codes* is ``True`` when at least one ``IMP-NNNNN`` or
+      ``ORA-NNNNN`` token was found in *output*.
+    * *known_nonfatal* is the subset of found codes present in
+      :data:`_NON_FATAL_IMP_CODES`.
+    * *unknown* is the subset of found codes **not** in the known set.
+
+    When *has_codes* is ``False`` the caller should propagate the error
+    (no recognisable codes means an unexpected failure).  When
+    *has_codes* is ``True`` the caller swallows the error and adjusts the
+    log level: ``INFO`` when all codes are known non-fatal, ``WARNING``
+    when any unknown code is present.
     """
-    found = set(re.findall(r"(IMP-\d+|ORA-\d+)", output))
-    return bool(found) and found.issubset(_NON_FATAL_IMP_CODES)
+    found = frozenset(re.findall(r"(IMP-\d+|ORA-\d+)", output))
+    if not found:
+        return False, frozenset(), frozenset()
+    known = found & _NON_FATAL_IMP_CODES
+    unknown = found - _NON_FATAL_IMP_CODES
+    return True, known, unknown
 
 
 _INDEXFILE_NAME = "dmpconverter-legacy-discovery.sql"
@@ -230,13 +251,24 @@ class LegacyDumpWorkflow(DumpWorkflow):
         try:
             self._inspect_runner.run_imp(job)
         except DataPumpError as exc:
-            if _only_non_fatal_errors(str(exc)):
-                LOGGER.warning(
-                    "Legacy bulk metadata import for %s completed with non-fatal errors "
-                    "(IMP/ORA codes in output are all known non-fatal): %s",
-                    source_schema,
-                    str(exc)[:400],
-                )
+            has_codes, known, unknown = _classify_imp_errors(str(exc))
+            if has_codes:
+                if unknown:
+                    LOGGER.warning(
+                        "Legacy bulk metadata import for %s completed with errors "
+                        "containing unknown IMP/ORA codes %s (known non-fatal: %s): %s",
+                        source_schema,
+                        sorted(unknown),
+                        sorted(known),
+                        str(exc)[:400],
+                    )
+                else:
+                    LOGGER.info(
+                        "Legacy bulk metadata import for %s completed with non-fatal errors "
+                        "(IMP/ORA codes in output are all known non-fatal): %s",
+                        source_schema,
+                        str(exc)[:400],
+                    )
                 return
             raise
 
@@ -260,14 +292,26 @@ class LegacyDumpWorkflow(DumpWorkflow):
         try:
             self._inspect_runner.run_imp(job)
         except DataPumpError as exc:
-            if _only_non_fatal_errors(str(exc)):
-                LOGGER.warning(
-                    "Legacy metadata import for %s.%s completed with non-fatal errors "
-                    "(IMP/ORA codes in output are all known non-fatal): %s",
-                    source_schema,
-                    table,
-                    str(exc)[:400],
-                )
+            has_codes, known, unknown = _classify_imp_errors(str(exc))
+            if has_codes:
+                if unknown:
+                    LOGGER.warning(
+                        "Legacy metadata import for %s.%s completed with errors "
+                        "containing unknown IMP/ORA codes %s (known non-fatal: %s): %s",
+                        source_schema,
+                        table,
+                        sorted(unknown),
+                        sorted(known),
+                        str(exc)[:400],
+                    )
+                else:
+                    LOGGER.info(
+                        "Legacy metadata import for %s.%s completed with non-fatal errors "
+                        "(IMP/ORA codes in output are all known non-fatal): %s",
+                        source_schema,
+                        table,
+                        str(exc)[:400],
+                    )
                 return
             raise
 
