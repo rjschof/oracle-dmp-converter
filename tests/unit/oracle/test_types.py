@@ -70,9 +70,14 @@ def test_xmltype_is_stringified() -> None:
     assert export_expression(column) == "XMLSERIALIZE(DOCUMENT C1 AS CLOB)"
 
 
+def test_oversized_number_precision_uses_decimal256() -> None:
+    """A NUMBER whose precision exceeds 38 but fits 76 uses decimal256."""
+    assert oracle_to_arrow_token(col("NUMBER", 40, 2)) == "decimal256(40,2)"
+
+
 def test_oversized_number_precision_falls_back_to_double() -> None:
-    """A NUMBER whose precision exceeds Oracle's max (38) can't fit decimal128 → double."""
-    assert oracle_to_arrow_token(col("NUMBER", 40, 2)) == "double"
+    """A NUMBER whose precision exceeds decimal256's max (76) → double."""
+    assert oracle_to_arrow_token(col("NUMBER", 80, 2)) == "double"
 
 
 def test_timestamp_with_time_zone_uses_explicit_format() -> None:
@@ -110,14 +115,24 @@ def test_negative_scale_wide_maps_to_scale0_decimal() -> None:
     assert oracle_to_arrow_token(col("NUMBER", 20, -2)) == "decimal128(22,0)"
 
 
-def test_negative_scale_overflowing_precision_falls_back_to_double() -> None:
-    """NUMBER(38,-10) needs 48 digits > decimal128 max (38) → double."""
-    assert oracle_to_arrow_token(col("NUMBER", 38, -10)) == "double"
+def test_negative_scale_overflowing_128_uses_decimal256() -> None:
+    """NUMBER(38,-10) needs 48 digits > decimal128 max (38) → decimal256."""
+    assert oracle_to_arrow_token(col("NUMBER", 38, -10)) == "decimal256(48,0)"
+
+
+def test_negative_scale_overflowing_256_falls_back_to_double() -> None:
+    """NUMBER(70,-10) needs 80 digits > decimal256 max (76) → double."""
+    assert oracle_to_arrow_token(col("NUMBER", 70, -10)) == "double"
 
 
 def test_scale_greater_than_precision_widens_precision() -> None:
     """NUMBER(2,5) is a pure fraction; precision must be >= scale for decimal128."""
     assert oracle_to_arrow_token(col("NUMBER", 2, 5)) == "decimal128(5,5)"
+
+
+def test_large_scale_greater_than_38_uses_decimal256() -> None:
+    """NUMBER(2,40) needs 40-digit precision → decimal256."""
+    assert oracle_to_arrow_token(col("NUMBER", 2, 40)) == "decimal256(40,40)"
 
 
 def test_unbounded_number_with_huge_scale_clamps_scale() -> None:

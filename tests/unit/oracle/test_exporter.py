@@ -57,6 +57,9 @@ class TestArrowTypeForColumn:
     def test_number_decimal(self) -> None:
         assert arrow_type_for_column(_col("NUMBER", 20, 4)) == pa.decimal128(20, 4)
 
+    def test_number_decimal256(self) -> None:
+        assert arrow_type_for_column(_col("NUMBER", 39, 2)) == pa.decimal256(39, 2)
+
     def test_number_unconstrained(self) -> None:
         # Unbounded NUMBER now maps to the widest fixed-precision decimal
         # so values past 2^53 round-trip without silent precision loss.
@@ -139,6 +142,9 @@ class TestCoerceValue:
 
     def test_decimal_rescaling(self) -> None:
         assert _coerce_value(Decimal("25.9000000000"), pa.decimal128(12, 2)) == Decimal("25.90")
+
+    def test_decimal256_rescaling(self) -> None:
+        assert _coerce_value(Decimal("25.9000000000"), pa.decimal256(40, 2)) == Decimal("25.90")
 
     def test_date_to_datetime(self) -> None:
         result = _coerce_value(date(2024, 1, 15), pa.timestamp("us"))
@@ -440,6 +446,8 @@ class TestNumberEdgeScalesRoundTrip:
             (20, -2, Decimal("12300"), Decimal("12300")),  # decimal128(22,0)
             (2, 5, Decimal("0.00012"), Decimal("0.00012")),  # decimal128(5,5)
             (5, 7, Decimal("0.0000012"), Decimal("0.0000012")),  # decimal128(7,7)
+            (39, 2, Decimal("123.45"), Decimal("123.45")),  # decimal256(39,2)
+            (40, 0, Decimal("1234567890"), Decimal("1234567890")),  # decimal256(40,0)
         ],
     )
     def test_parquet_write_and_read_back(
