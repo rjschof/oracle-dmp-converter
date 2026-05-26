@@ -132,16 +132,17 @@ def render_legacy_import_parfile(job: LegacyImportJob) -> str:
     if job.data_only:
         # DATA_ONLY=Y imports row data without re-applying metadata
         # objects (VPD policies, triggers, grants, etc.).  It supersedes
-        # the ROWS= parameter.
+        # the ROWS= parameter and is incompatible with IGNORE, INDEXES,
+        # GRANTS, and CONSTRAINTS.
         lines.append("DATA_ONLY=Y")
     else:
         lines.append(f"ROWS={'Y' if job.rows else 'N'}")
-    lines += [
-        f"INDEXES={'Y' if job.indexes else 'N'}",
-        f"GRANTS={'Y' if job.grants else 'N'}",
-        f"CONSTRAINTS={'Y' if job.constraints else 'N'}",
-        f"IGNORE={'Y' if job.ignore else 'N'}",
-    ]
+        lines += [
+            f"INDEXES={'Y' if job.indexes else 'N'}",
+            f"GRANTS={'Y' if job.grants else 'N'}",
+            f"CONSTRAINTS={'Y' if job.constraints else 'N'}",
+            f"IGNORE={'Y' if job.ignore else 'N'}",
+        ]
     if job.tables:
         tables_list = ", ".join(job.tables)
         lines.append(f"TABLES=({tables_list})")

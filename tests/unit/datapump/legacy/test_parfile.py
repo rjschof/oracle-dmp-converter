@@ -142,6 +142,10 @@ class TestRenderLegacyImportParfile:
         output = render_legacy_import_parfile(job)
         assert "DATA_ONLY=Y" in output
         assert "ROWS=" not in output
+        assert "IGNORE=" not in output
+        assert "INDEXES=" not in output
+        assert "GRANTS=" not in output
+        assert "CONSTRAINTS=" not in output
         assert "TABLES=(ORDERS)" in output
 
     def test_no_tables_filter(self) -> None:
