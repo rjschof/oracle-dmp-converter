@@ -43,6 +43,10 @@ UNSUPPORTED_COLUMN_TYPES = frozenset({"BFILE"})
 # It is also the widest precision ``decimal128`` (and the Parquet/Avro decimal
 # logical types) can represent.
 _NUMBER_MAX_PRECISION = 38
+# The widest precision ``decimal256`` can represent (76 digits).  Columns
+# whose effective precision exceeds ``_NUMBER_MAX_PRECISION`` but fits within
+# this limit use ``decimal256`` instead of falling back to lossy ``double``.
+_NUMBER_MAX_PRECISION_256 = 76
 # A scale-0 ``NUMBER`` with this many digits or fewer fits losslessly in int64
 # (2^63-1 has 19 digits, so 18 is the safe limit).
 _INT64_MAX_DIGITS = 18
@@ -65,8 +69,9 @@ def _number_token(precision: int | None, scale: int | None) -> str:
     * scale ``s`` greater than ``precision`` → ``decimal128(s, s)`` (the
       value is a fraction, so ``s`` significant digits suffice).
 
-    Anything that would need more than :data:`_NUMBER_MAX_PRECISION` digits
-    falls back to ``double``.
+    Precisions up to :data:`_NUMBER_MAX_PRECISION` (38) use ``decimal128``;
+    precisions up to :data:`_NUMBER_MAX_PRECISION_256` (76) use ``decimal256``.
+    Anything wider falls back to ``double``.
     """
     scale = scale or 0
     if precision is None:
@@ -78,19 +83,22 @@ def _number_token(precision: int | None, scale: int | None) -> str:
         return f"decimal128({_NUMBER_MAX_PRECISION},{arrow_scale})"
     if scale < 0:
         arrow_precision = precision - scale  # precision + |scale|
-        if arrow_precision > _NUMBER_MAX_PRECISION:
+        if arrow_precision > _NUMBER_MAX_PRECISION_256:
             return "double"
         if arrow_precision <= _INT64_MAX_DIGITS:
             return "int64"
-        return f"decimal128({arrow_precision},0)"
+        decimal_width = "128" if arrow_precision <= _NUMBER_MAX_PRECISION else "256"
+        return f"decimal{decimal_width}({arrow_precision},0)"
     if scale == 0:
         if precision <= _INT64_MAX_DIGITS:
             return "int64"
-        return f"decimal128({precision},0)"
+        decimal_width = "128" if precision <= _NUMBER_MAX_PRECISION else "256"
+        return f"decimal{decimal_width}({precision},0)"
     arrow_precision = max(precision, scale)
-    if arrow_precision > _NUMBER_MAX_PRECISION:
+    if arrow_precision > _NUMBER_MAX_PRECISION_256:
         return "double"
-    return f"decimal128({arrow_precision},{scale})"
+    decimal_width = "128" if arrow_precision <= _NUMBER_MAX_PRECISION else "256"
+    return f"decimal{decimal_width}({arrow_precision},{scale})"
 
 
 def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | None = None) -> str:
@@ -106,7 +114,9 @@ def oracle_to_arrow_token(column: ColumnMetadata, override: ColumnOverride | Non
     * ``"binary"`` — raw bytes.
     * ``"timestamp_us"`` — microsecond-resolution timestamp.
     * ``"decimal128(p,s)"`` — fixed-precision decimal with precision *p* and
-      scale *s*.
+      scale *s* (precision ≤ 38).
+    * ``"decimal256(p,s)"`` — wide fixed-precision decimal for precisions
+      39–76.
 
     If *override* supplies a ``parquet_type``, it is returned verbatim so the
     caller can inject custom type mappings.

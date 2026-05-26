@@ -67,6 +67,9 @@ def arrow_type_for_column(
     if type_name.startswith("decimal128(") and type_name.endswith(")"):
         precision, scale = type_name[len("decimal128(") : -1].split(",", 1)
         return pa.decimal128(int(precision), int(scale))
+    if type_name.startswith("decimal256(") and type_name.endswith(")"):
+        precision, scale = type_name[len("decimal256(") : -1].split(",", 1)
+        return pa.decimal256(int(precision), int(scale))
     return pa.string()
 
 
