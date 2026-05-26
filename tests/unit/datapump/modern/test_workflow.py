@@ -159,3 +159,6 @@ class TestMakeModernRunners:
         assert disc.container is container
         assert insp.container is container
         assert conv.container is container
+        assert disc.keep_parfiles is True
+        assert insp.keep_parfiles is True
+        assert conv.keep_parfiles is True
