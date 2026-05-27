@@ -4,7 +4,7 @@ from oracle_dmp_converter.converter import OracleDMPConverter
 from oracle_dmp_converter.models import DumpFormat, OutputFormat
 from oracle_dmp_converter.settings import ConverterSettings
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 __all__ = [
     "ConverterSettings",
