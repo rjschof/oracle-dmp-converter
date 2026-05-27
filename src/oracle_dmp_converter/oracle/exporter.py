@@ -266,6 +266,21 @@ def _rows_to_table(rows: list[tuple[Any, ...]], schema: pa.Schema) -> pa.Table:
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
+def _fetch_number_as_decimal(cursor: oracledb.Cursor, metadata: Any) -> Any:
+    """Output type handler making Oracle NUMBER columns fetch as ``Decimal`` (#8).
+
+    By default ``oracledb`` fetches NUMBER as a Python ``float``, which loses
+    precision past 2**53 — so a wide value like ``NUMBER(38,-10)`` would already
+    be corrupted before :func:`_coerce_value` ever sees it, regardless of the
+    ``decimal256`` Arrow type.  Binding the column to ``Decimal`` keeps the full
+    precision end to end.  Non-NUMBER columns return ``None`` to fall back to the
+    driver's default handling.
+    """
+    if metadata.type_code is oracledb.DB_TYPE_NUMBER:
+        return cursor.var(Decimal, arraysize=cursor.arraysize)
+    return None
+
+
 def export_table(
     conn: oracledb.Connection,
     *,
@@ -315,6 +330,10 @@ def export_table(
     try:
         with conn.cursor() as cursor:
             cursor.arraysize = batch_size
+            # Fetch NUMBER as Decimal so wide values (NUMBER(38,-10),
+            # NUMBER(39+) → decimal256) round-trip exactly instead of through
+            # a lossy float.  See :func:`_fetch_number_as_decimal`.
+            cursor.outputtypehandler = _fetch_number_as_decimal
             cursor.execute(sql)
             while True:
                 rows = cursor.fetchmany(batch_size)

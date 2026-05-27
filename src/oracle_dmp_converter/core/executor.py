@@ -428,8 +428,13 @@ class StagingExecutor:
             dematerialize_mviews(conn, stage_schema)
             disable_triggers(conn, stage_schema)
             disable_foreign_keys(conn, stage_schema)
-            drop_vpd_policies(conn, stage_schema)
+            # Drop the policy functions BEFORE the policies: the function
+            # discovery reads ALL_POLICIES, so the policies must still exist
+            # when drop_vpd_policy_functions runs.  (Dropping a function while
+            # its policy is still attached is allowed, and no query touches the
+            # protected table between here and drop_vpd_policies.)
             drop_vpd_policy_functions(conn, stage_schema)
+            drop_vpd_policies(conn, stage_schema)
             apply_byte_to_char(conn, stage_schema)
 
     def inspect_dump(self) -> DumpManifest:

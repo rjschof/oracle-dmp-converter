@@ -3,7 +3,8 @@
 The dump is produced by ``scripts/create_full_combined_dump.py`` and
 exercises the full audit-coverage fixture: IOT, identity columns,
 composite/interval/reference partitioning, virtual + invisible columns,
-JSON, XMLTYPE, mixed-case identifiers, etc.  Tables containing
+JSON, XMLTYPE, mixed-case identifiers, wide decimal256 NUMBER columns
+(``FINANCE.WIDE_DECIMALS``, #8), etc.  Tables containing
 fundamentally unexportable types (BFILE, user-defined OBJECT / VARRAY)
 are expected to appear in the conversion report's ``skipped`` list
 rather than as successful conversions.
@@ -33,9 +34,12 @@ from __future__ import annotations
 
 import json
 import os
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
@@ -74,6 +78,7 @@ _EXPECTED_ROWS: dict[str, dict[str, int]] = {
         "TRANSACTION_DETAILS": 80,
         "TRANSACTION_DOCS": 5,
         "TRANSACTION_LINES": 60,
+        "WIDE_DECIMALS": 3,
     },
     "HRDATA": {
         "DEPARTMENTS": 5,
@@ -98,6 +103,12 @@ _EXPECTED_ROWS: dict[str, dict[str, int]] = {
     },
 }
 _TOTAL_ROWS = sum(n for tbl in _EXPECTED_ROWS.values() for n in tbl.values())
+
+# FINANCE.WIDE_DECIMALS wide-NUMBER values (#8), mirrored by hand from
+# scripts/create_full_combined_dump.py.  The #8 fix lives in the shared export
+# path, so the modern dump exercises it too.
+_WIDE_BIG_NEG = 1234567890123456789 * 10**10  # NUMBER(38,-10) -> decimal256(48,0)
+_WIDE_BIG_NEG2 = 12345678901234567890 * 10**20  # NUMBER(30,-20) -> decimal256(50,0)
 
 # Tables containing fundamentally unexportable columns/types — the
 # planner marks them UNSUPPORTED and the convert phase records them in
@@ -230,6 +241,35 @@ def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
     )
 
 
+def _assert_wide_decimals_decimal256(output_dir: Path) -> None:
+    """#8: FINANCE.WIDE_DECIMALS maps wide NUMBER columns to decimal256 and
+    round-trips values past 2**53 exactly (shared export path; modern dump too).
+    """
+    files = sorted((output_dir / "FINANCE" / "WIDE_DECIMALS").glob("*.parquet"))
+    assert files, "No parquet files for FINANCE.WIDE_DECIMALS"
+    schema = pq.read_schema(files[0])
+
+    for col in ("N_NEG", "N_NEG2", "N_FRAC"):
+        ftype = schema.field(col).type
+        assert pa.types.is_decimal256(ftype), (
+            f"{col}: expected decimal256, got {ftype} (regression to lossy double?)"
+        )
+        assert 39 <= ftype.precision <= 76, f"{col}: precision {ftype.precision} out of 39-76"
+    assert pa.types.is_decimal128(schema.field("N_128").type), (
+        "N_128 should be the decimal128 control"
+    )
+
+    table = pq.read_table(files[0]).to_pydict()
+    n_neg = dict(zip(table["ROW_ID"], table["N_NEG"], strict=True))
+    n_neg2 = dict(zip(table["ROW_ID"], table["N_NEG2"], strict=True))
+    assert n_neg[1] == Decimal(_WIDE_BIG_NEG), (
+        f"N_NEG row 1: expected {_WIDE_BIG_NEG}, got {n_neg[1]} (lossy fetch?)"
+    )
+    assert n_neg2[1] == Decimal(_WIDE_BIG_NEG2), (
+        f"N_NEG2 row 1: expected {_WIDE_BIG_NEG2}, got {n_neg2[1]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -308,6 +348,8 @@ def test_modern_convert(shared_work: SimpleNamespace, tmp_path: Path) -> None:
 
     _assert_output(output_dir, OutputFormat.PARQUET, "parquet")
     _assert_conversion_report(shared_work.work_dir, _TOTAL_ROWS)
+    # #8: wide NUMBER columns map to decimal256 and round-trip exactly.
+    _assert_wide_decimals_decimal256(output_dir)
 
 
 def test_modern_convert_oneshot(tmp_path: Path) -> None:

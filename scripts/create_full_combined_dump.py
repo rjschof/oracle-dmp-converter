@@ -38,6 +38,7 @@ import tempfile
 import uuid
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
+from decimal import Decimal
 from pathlib import Path
 
 import oracledb
@@ -50,6 +51,7 @@ from oracle_dmp_converter.datapump.legacy.parfile import (
 )
 from oracle_dmp_converter.datapump.modern.parfile import ExportJob
 from oracle_dmp_converter.datapump.modern.runner import DataPumpRunner
+from oracle_dmp_converter.errors import DataPumpError
 from oracle_dmp_converter.oracle.conn import (
     OracleCredentials,
     create_directory,
@@ -71,6 +73,15 @@ MODERN_DUMPFILE = "full_combined_modern.dmp"
 MODERN_LOGFILE = "full_combined_modern_export.log"
 LEGACY_DUMPFILE = "full_combined_legacy.dmp"
 LEGACY_LOGFILE = "full_combined_legacy_export.log"
+
+# FINANCE.WIDE_DECIMALS (#8) — values with far more than 15 significant digits,
+# so the historical lossy float fetch / ``double`` fallback for wide NUMBER
+# columns corrupts them.  Multiples of 10**10 / 10**20 so they store exactly in
+# the negative-scale columns.  Kept in sync by hand with the assertions in
+# ``tests/integration/test_data_legacy_dump.py`` / ``test_data_modern_dump.py``
+# (tests must not import from ``scripts/``, which is not a package).
+WIDE_BIG_NEG = 1234567890123456789 * 10**10  # NUMBER(38,-10) -> decimal256(48,0)
+WIDE_BIG_NEG2 = 12345678901234567890 * 10**20  # NUMBER(30,-20) -> decimal256(50,0)
 
 
 # ---------------------------------------------------------------------------
@@ -1415,6 +1426,27 @@ def create_audit_tier2_tables(conn: oracledb.Connection) -> None:
         ignored_codes={942},
     )
 
+    _try_ddl(
+        conn,
+        "FINANCE.WIDE_DECIMALS (#8 decimal256: effective precision 39-76)",
+        [
+            "DROP TABLE FINANCE.WIDE_DECIMALS PURGE",
+            # Effective precision >38 is only reachable via negative scale
+            # (precision - scale) or scale > precision, so these map to
+            # decimal256, not the old lossy ``double`` fallback.  N_128 is a
+            # decimal128 control.  Negative-scale + scale>precision NUMBER
+            # columns round-trip through legacy ``exp`` (see NUMERIC_EDGE).
+            "CREATE TABLE FINANCE.WIDE_DECIMALS ("
+            "  ROW_ID NUMBER(10) PRIMARY KEY,"
+            "  N_NEG  NUMBER(38,-10),"  # -> decimal256(48,0)
+            "  N_NEG2 NUMBER(30,-20),"  # -> decimal256(50,0)
+            "  N_FRAC NUMBER(5,40),"  # -> decimal256(40,40)  (scale > precision)
+            "  N_128  NUMBER(20,4)"  # -> decimal128(20,4)    (control)
+            ") TABLESPACE COMBINED_DATA",
+        ],
+        ignored_codes={942},
+    )
+
 
 def create_audit_tier3_tables(conn: oracledb.Connection) -> None:
     """Tier 3: partitioning + constraint coverage."""
@@ -1806,6 +1838,25 @@ def insert_audit_extension_data(conn: oracledb.Connection) -> None:
     except oracledb.DatabaseError as exc:
         LOGGER.warning("Audit-extension skip [NUMERIC_EDGE rows]: %s", exc)
 
+    # WIDE_DECIMALS (#8): values past 2**53 that only round-trip exactly with
+    # the decimal256 mapping AND the Decimal-fetch fix.  N_FRAC is NUMBER(5,40)
+    # (scale > precision) so its magnitude must be < 1e-35 (>= 35 leading zeros).
+    try:
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO FINANCE.WIDE_DECIMALS"
+                " (ROW_ID, N_NEG, N_NEG2, N_FRAC, N_128)"
+                " VALUES (:1, :2, :3, :4, :5)",
+                [
+                    (1, WIDE_BIG_NEG, WIDE_BIG_NEG2, Decimal("1.2345E-36"), Decimal("100.5000")),
+                    (2, -WIDE_BIG_NEG, 0, Decimal("9E-40"), Decimal("-42.2500")),
+                    (3, 0, WIDE_BIG_NEG2, Decimal("5.4321E-37"), Decimal("1234567890123456.7890")),
+                ],
+            )
+        conn.commit()
+    except oracledb.DatabaseError as exc:
+        LOGGER.warning("Audit-extension skip [WIDE_DECIMALS rows]: %s", exc)
+
     # TRANSACTION_DETAILS (subpartitioned) + LINES (reference partition).
     try:
         with conn.cursor() as cursor:
@@ -2004,21 +2055,36 @@ def export_modern_dump(
 
     with tempfile.TemporaryDirectory(prefix="oracle-combined-modern-") as tmp:
         runner = DataPumpRunner(container, Path(tmp))
-        runner.run_expdp(
-            ExportJob(
-                connection=OracleCredentials(admin.user, admin.password, admin.service),
-                directory=DUMP_DIRECTORY,
-                dumpfile=MODERN_DUMPFILE,
-                logfile=MODERN_LOGFILE,
-                include_schemas=SCHEMAS,
+        try:
+            runner.run_expdp(
+                ExportJob(
+                    connection=OracleCredentials(admin.user, admin.password, admin.service),
+                    directory=DUMP_DIRECTORY,
+                    dumpfile=MODERN_DUMPFILE,
+                    logfile=MODERN_LOGFILE,
+                    include_schemas=SCHEMAS,
+                )
             )
-        )
+        except DataPumpError:
+            # expdp returns EX_SUCC_ERR (5) for non-fatal errors.  The
+            # fixture's VPD policy on HRDATA.EMPLOYEES makes expdp emit
+            # ORA-39181 ("only partial table data ... fine grain access
+            # control"); SYSTEM holds EXP_FULL_DATABASE so every row is still
+            # exported and the dump is complete.  Tolerate it like the legacy
+            # exp path below, but only if a non-empty dump was produced.
+            modern_dump = output_dir / MODERN_DUMPFILE
+            if not (modern_dump.exists() and modern_dump.stat().st_size > 0):
+                raise
+            LOGGER.warning(
+                "expdp completed with non-fatal errors (e.g. ORA-39181 FGAC "
+                "partial-data warning from a VPD policy); modern dump was still produced."
+            )
         container.exec(
             [
                 "bash",
                 "-lc",
                 f"chmod a+r {CONTAINER_DUMP_PATH}/{MODERN_DUMPFILE} "
-                f"{CONTAINER_DUMP_PATH}/{MODERN_LOGFILE}",
+                f"{CONTAINER_DUMP_PATH}/{MODERN_LOGFILE} 2>/dev/null || true",
             ],
             check=False,
         )

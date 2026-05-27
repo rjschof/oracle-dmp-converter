@@ -28,19 +28,38 @@ Each test exercises one CLI subcommand:
 
   * test_legacy_inspect          — ``inspect`` only
   * test_legacy_plan             — ``plan`` (inspect already done by fixture)
-  * test_legacy_convert          — ``convert --plan`` (Parquet)
-  * test_legacy_convert_oneshot  — ``convert`` in one-shot mode (no prior ``--plan``)
+  * test_legacy_convert          — ``convert --plan`` (Parquet); also asserts #8
+  * test_legacy_convert_oneshot  — ``convert`` in one-shot mode; also asserts #4
   * test_legacy_convert_avro     — ``convert --plan --format avro`` (skipped)
   * test_legacy_convert_csv      — ``convert --plan --format csv`` (skipped)
+
+This file also guards two recent legacy-path fixes that the broad fixture now
+reproduces directly:
+
+  * #8 (``65bf682``) — ``FINANCE.WIDE_DECIMALS`` has NUMBER columns whose
+    effective precision is 39–76 (negative scale / scale>precision).  They map
+    to ``decimal256`` (not a lossy ``double``) and round-trip values past
+    ``2**53`` exactly via the Decimal-fetch fix in ``oracle/exporter.py``.
+  * #4 (``fc02356``) — parfiles are retained under
+    ``work_dir/{discovery,inspect,convert}/parfiles/``.
+
+The VPD-policy (#10) and fatal-``imp`` (#6) fixes can't be reproduced through a
+synthetic dump on a modern Oracle image (``exp`` skips VPD-protected tables; the
+fatal-``imp`` conditions don't arise from objects we can create here), so they
+are covered in ``test_legacy_bug_fixes.py`` by constructing the failing
+state directly in a live container.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
@@ -71,6 +90,7 @@ _EXPECTED_ROWS: dict[str, dict[str, int]] = {
         "NUMERIC_EDGE": 3,
         "TRANSACTIONS": 100,
         "TRANSACTION_DETAILS": 80,
+        "WIDE_DECIMALS": 3,
     },
     "HRDATA": {
         "DEPARTMENTS": 5,
@@ -91,6 +111,13 @@ _EXPECTED_ROWS: dict[str, dict[str, int]] = {
     },
 }
 _TOTAL_ROWS = sum(n for tbl in _EXPECTED_ROWS.values() for n in tbl.values())
+
+# FINANCE.WIDE_DECIMALS wide-NUMBER values (#8), mirrored by hand from
+# scripts/create_full_combined_dump.py (tests must not import from scripts/,
+# which is not a package).  Each has far more than 15 significant digits, so a
+# lossy float fetch or the old ``double`` fallback would corrupt it.
+_WIDE_BIG_NEG = 1234567890123456789 * 10**10  # NUMBER(38,-10) -> decimal256(48,0)
+_WIDE_BIG_NEG2 = 12345678901234567890 * 10**20  # NUMBER(30,-20) -> decimal256(50,0)
 
 # Tables present in the legacy dump's manifest that don't make it to
 # convert output, either because legacy exp produced incomplete
@@ -217,6 +244,39 @@ def _assert_conversion_report(work_dir: Path, expected_total_rows: int) -> None:
     )
 
 
+def _assert_wide_decimals_decimal256(output_dir: Path) -> None:
+    """#8: FINANCE.WIDE_DECIMALS maps wide NUMBER columns to decimal256 and
+    round-trips values past 2**53 exactly.
+
+    The column *type* check fails if the fix is reverted to a ``double``
+    fallback; the exact-value check fails if the Decimal-fetch fix is reverted
+    (a float fetch corrupts digits past 2**53).
+    """
+    files = sorted((output_dir / "FINANCE" / "WIDE_DECIMALS").glob("*.parquet"))
+    assert files, "No parquet files for FINANCE.WIDE_DECIMALS"
+    schema = pq.read_schema(files[0])
+
+    for col in ("N_NEG", "N_NEG2", "N_FRAC"):
+        ftype = schema.field(col).type
+        assert pa.types.is_decimal256(ftype), (
+            f"{col}: expected decimal256, got {ftype} (regression to lossy double?)"
+        )
+        assert 39 <= ftype.precision <= 76, f"{col}: precision {ftype.precision} out of 39-76"
+    assert pa.types.is_decimal128(schema.field("N_128").type), (
+        "N_128 should be the decimal128 control"
+    )
+
+    table = pq.read_table(files[0]).to_pydict()
+    n_neg = dict(zip(table["ROW_ID"], table["N_NEG"], strict=True))
+    n_neg2 = dict(zip(table["ROW_ID"], table["N_NEG2"], strict=True))
+    assert n_neg[1] == Decimal(_WIDE_BIG_NEG), (
+        f"N_NEG row 1: expected {_WIDE_BIG_NEG}, got {n_neg[1]} (lossy fetch?)"
+    )
+    assert n_neg2[1] == Decimal(_WIDE_BIG_NEG2), (
+        f"N_NEG2 row 1: expected {_WIDE_BIG_NEG2}, got {n_neg2[1]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -282,6 +342,8 @@ def test_legacy_convert(shared_work: SimpleNamespace, tmp_path: Path) -> None:
 
     _assert_output(output_dir, OutputFormat.PARQUET, "parquet")
     _assert_conversion_report(shared_work.work_dir, _TOTAL_ROWS)
+    # #8: wide NUMBER columns map to decimal256 and round-trip exactly.
+    _assert_wide_decimals_decimal256(output_dir)
 
 
 def test_legacy_convert_oneshot(tmp_path: Path) -> None:
@@ -313,6 +375,11 @@ def test_legacy_convert_oneshot(tmp_path: Path) -> None:
 
     _assert_output(output_dir, OutputFormat.PARQUET, "parquet")
     _assert_conversion_report(work_dir, _TOTAL_ROWS)
+
+    # #4: parfiles are retained under every phase's parfiles/ directory.
+    for phase in ("discovery", "inspect", "convert"):
+        parfiles = list((work_dir / phase / "parfiles").glob("*.par"))
+        assert parfiles, f"No retained .par files in {phase}/parfiles (keep_parfiles regression?)"
 
 
 @pytest.mark.skip(

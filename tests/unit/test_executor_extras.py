@@ -170,6 +170,33 @@ class TestApplyStagingFixups:
         m3b.assert_called_once()
         m4.assert_called_once()
 
+    def test_drops_policy_functions_before_policies(self) -> None:
+        """Regression: drop_vpd_policy_functions must run BEFORE drop_vpd_policies.
+
+        Function discovery reads ALL_POLICIES, so dropping the policies first
+        leaves nothing to find and the functions silently survive.
+        """
+        executor = _make_executor()
+        _, mock_ctx = _mock_conn_ctx()
+        order: list[str] = []
+        with (
+            patch("oracle_dmp_converter.core.executor.oracle_connection", return_value=mock_ctx),
+            patch("oracle_dmp_converter.core.executor.dematerialize_mviews"),
+            patch("oracle_dmp_converter.core.executor.disable_triggers"),
+            patch("oracle_dmp_converter.core.executor.disable_foreign_keys"),
+            patch(
+                "oracle_dmp_converter.core.executor.drop_vpd_policies",
+                side_effect=lambda *a, **k: order.append("policies"),
+            ),
+            patch(
+                "oracle_dmp_converter.core.executor.drop_vpd_policy_functions",
+                side_effect=lambda *a, **k: order.append("functions"),
+            ),
+            patch("oracle_dmp_converter.core.executor.apply_byte_to_char"),
+        ):
+            executor._apply_staging_fixups("MYSCHEMA")
+        assert order == ["functions", "policies"]
+
 
 # ---------------------------------------------------------------------------
 # prepare_stage_schema

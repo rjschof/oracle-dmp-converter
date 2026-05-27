@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import oracledb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -19,6 +20,7 @@ from oracle_dmp_converter.oracle.exporter import (
     _coerce_value,
     _db_object_to_text,
     _decode_utf8,
+    _fetch_number_as_decimal,
     _field_metadata_for,
     _read_lob,
     _rows_to_table,
@@ -531,3 +533,20 @@ class TestFieldMetadataFor:
         field = schema.field("EMAIL")
         assert field.metadata is not None
         assert field.metadata.get(b"oracle_comment") == b"work email"
+
+
+class TestFetchNumberAsDecimal:
+    """The output type handler that makes NUMBER columns fetch as Decimal (#8)."""
+
+    def test_number_column_fetches_as_decimal(self) -> None:
+        cursor = MagicMock()
+        cursor.arraysize = 50
+        metadata = MagicMock(type_code=oracledb.DB_TYPE_NUMBER)
+        _fetch_number_as_decimal(cursor, metadata)
+        cursor.var.assert_called_once_with(Decimal, arraysize=50)
+
+    def test_non_number_column_left_to_default(self) -> None:
+        cursor = MagicMock()
+        metadata = MagicMock(type_code=oracledb.DB_TYPE_VARCHAR)
+        assert _fetch_number_as_decimal(cursor, metadata) is None
+        cursor.var.assert_not_called()

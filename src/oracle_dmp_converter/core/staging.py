@@ -227,8 +227,14 @@ def drop_vpd_policy_functions(conn: oracledb.Connection, stage_schema: str) -> i
     re-attach the policy — and if the function still exists in the staging
     schema the ``ADD_POLICY`` call succeeds, but the function may reference
     objects that no longer resolve correctly, leading to ``ORA-28100`` at
-    query time.  Dropping the functions *after* the policies have been removed
-    (see :func:`drop_vpd_policies`) prevents this.
+    query time.  Dropping the functions prevents this.
+
+    This must run **before** :func:`drop_vpd_policies`: function discovery
+    reads ``ALL_POLICIES`` to learn which functions a policy references, so the
+    policies must still exist when this runs.  (Dropping a function while its
+    policy is still attached is permitted; the caller drops the policies
+    immediately afterwards, and no query touches the protected table in
+    between.)
 
     Only standalone functions owned by *stage_schema* are dropped (i.e.
     ``PF_OWNER = stage_schema`` and ``PACKAGE IS NULL``).  Packaged policy
